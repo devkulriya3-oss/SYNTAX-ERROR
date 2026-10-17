@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GatePass — QR Event Check-In Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              navy: '#17243A',
+              'navy-light': '#1E2E4A',
+              'navy-dark': '#0F1726',
+              blue: '#4263EB',
+              'blue-hover': '#364FC7',
+              bg: '#F7F8FA',
+              border: '#E2E8F0',
+              text: '#0F172A',
+            },
+            status: {
+              'success-bg': '#ECFDF5',
+              'success-border': '#A7F3D0',
+              'success-text': '#065F46',
+              'warning-bg': '#FFFBEB',
+              'warning-border': '#FDE68A',
+              'warning-text': '#92400E',
+              'error-bg': '#FEF2F2',
+              'error-border': '#FECACA',
+              'error-text': '#991B1B',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18, ReactDOM & Babel for in-browser execution -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Lucide Icons & HTML5-QRCode -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <!-- QRCode Generator -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #F7F8FA; color: #0F172A; }
+    @media print {
+      body { background-color: white !important; }
+      aside, header, nav, button, .no-print { display: none !important; }
+      #printable-ticket { display: block !important; position: absolute; left: 0; top: 0; width: 100%; border: 1px solid #ccc; }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // --- Web Audio API Feedback ---
+    class SoundEngine {
+      constructor() {
+        this.enabled = true;
+        this.ctx = null;
+      }
+      getCtx() {
+        if (!this.enabled) return null;
+        try {
+          if (!this.ctx) {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (AudioCtx) this.ctx = new AudioCtx();
+          }
+          if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+          return this.ctx;
+        } catch { return null; }
+      }
+      playSuccess() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(659.25, now);
+        osc.frequency.setValueAtTime(880.00, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      }
+      playDuplicate() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.setValueAtTime(370, now + 0.12);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.3);
+      }
+      playInvalid() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        osc.frequency.setValueAtTime(196, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.4);
+      }
+    }
+    const sound = new SoundEngine();
+
+    // --- Baseline Demo Data ---
+    const BASELINE_EVENT = {
+      id: 'evt_techconnect_2026',
+      name: 'TechConnect 2026',
+      tagline: 'Annual Global Developer & Systems Architecture Summit',
+      venue: 'Metropolitan Convention Center, Hall B & Grand Ballroom',
+      date_str: 'Saturday, Oct 24, 2026',
+      doors_open: '08:30 AM',
+      status: 'active'
+    };
+
+    const INITIAL_ATTENDEES = [
+      { id: 'att_101', name: 'Elena Rostova', email: 'elena.rostova@cloudscale.io', phone: '+1 (415) 892-3401', ticket_type: 'Speaker', company: 'CloudScale Labs', pass_code: 'GP-TC26-SPK01', checked_in: 1, checked_in_at: '2026-10-24 08:42:15', gate: 'VIP/Speaker Gate A', notes: 'Keynote Speaker' },
+      { id: 'att_102', name: 'Marcus Vance', email: 'marcus.v@datadynamics.com', phone: '+1 (206) 555-0182', ticket_type: 'VIP', company: 'Data Dynamics', pass_code: 'GP-TC26-VIP02', checked_in: 1, checked_in_at: '2026-10-24 08:50:33', gate: 'VIP/Speaker Gate A', notes: 'Executive Pass' },
+      { id: 'att_103', name: 'Aisha Al-Mansoor', email: 'aisha.mansoor@vectorquant.ai', phone: '+1 (650) 441-9032', ticket_type: 'Speaker', company: 'VectorQuant AI', pass_code: 'GP-TC26-SPK03', checked_in: 1, checked_in_at: '2026-10-24 08:58:45', gate: 'VIP/Speaker Gate A', notes: 'Panelist' },
+      { id: 'att_104', name: 'Liam Gallagher', email: 'liam.g@sentrymesh.net', phone: '+1 (312) 670-4921', ticket_type: 'General Admission', company: 'SentryMesh Security', pass_code: 'GP-TC26-GA104', checked_in: 1, checked_in_at: '2026-10-24 09:05:12', gate: 'North Turnstile 2', notes: '' },
+      { id: 'att_105', name: 'Dr. Hiroshi Tanaka', email: 'htanaka@tokyo-systems.jp', phone: '+81 3 5555 0144', ticket_type: 'VIP', company: 'Tokyo Systems Research', pass_code: 'GP-TC26-VIP05', checked_in: 1, checked_in_at: '2026-10-24 09:12:08', gate: 'VIP/Speaker Gate A', notes: 'Delegation Head' },
+      { id: 'att_106', name: 'Sofia Ramirez', email: 'sofia.ramirez@apexinfra.io', phone: '+1 (512) 902-8311', ticket_type: 'Sponsor', company: 'Apex Infrastructure', pass_code: 'GP-TC26-SPO06', checked_in: 1, checked_in_at: '2026-10-24 09:18:50', gate: 'Exhibition Gate C', notes: 'Booth Lead #B12' },
+      { id: 'att_107', name: 'Devon Brooks', email: 'dbrooks@kernelcore.org', phone: '+1 (415) 330-1849', ticket_type: 'General Admission', company: 'KernelCore', pass_code: 'GP-TC26-GA107', checked_in: 1, checked_in_at: '2026-10-24 09:24:19', gate: 'North Turnstile 1', notes: '' },
+      { id: 'att_108', name: 'Clara Johansson', email: 'clara@nordicbyte.se', phone: '+46 8 123 4567', ticket_type: 'Press', company: 'Nordic Tech Journal', pass_code: 'GP-TC26-PRS08', checked_in: 1, checked_in_at: '2026-10-24 09:31:02', gate: 'Media Desk Gate B', notes: 'Accredited Journalist' },
+      { id: 'att_109', name: 'Arjun Mehta', email: 'arjun.mehta@fintechgrid.in', phone: '+91 98200 12345', ticket_type: 'General Admission', company: 'FintechGrid Services', pass_code: 'GP-TC26-GA109', checked_in: 1, checked_in_at: '2026-10-24 09:37:44', gate: 'North Turnstile 3', notes: '' },
+      { id: 'att_110', name: 'Zoe Washington', email: 'zoe.w@chronosdata.com', phone: '+1 (202) 801-4490', ticket_type: 'General Admission', company: 'Chronos Data', pass_code: 'GP-TC26-GA110', checked_in: 1, checked_in_at: '2026-10-24 09:44:28', gate: 'North Turnstile 2', notes: '' },
+      // Absent / Not Arrived
+      { id: 'att_111', name: 'Nathaniel Cole', email: 'nathaniel.c@hyperioncompute.com', phone: '+1 (617) 492-8002', ticket_type: 'VIP', company: 'Hyperion Compute', pass_code: 'GP-TC26-VIP11', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_112', name: 'Maya Patel', email: 'maya.patel@synthetica.co', phone: '+1 (408) 723-9912', ticket_type: 'Speaker', company: 'Synthetica AI', pass_code: 'GP-TC26-SPK12', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_113', name: 'Lucas Bernard', email: 'l.bernard@quantumnext.fr', phone: '+33 1 42 68 55 00', ticket_type: 'General Admission', company: 'QuantumNext Paris', pass_code: 'GP-TC26-GA113', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_114', name: 'Samantha O\'Connor', email: 'samantha.oc@pulsefire.io', phone: '+1 (604) 390-1178', ticket_type: 'General Admission', company: 'PulseFire', pass_code: 'GP-TC26-GA114', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_115', name: 'Kenji Sato', email: 'k.sato@cybertrust.co.jp', phone: '+81 6 6201 3300', ticket_type: 'Sponsor', company: 'CyberTrust Global', pass_code: 'GP-TC26-SPO15', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_116', name: 'Fatima Zahra', email: 'f.zahra@atlascloud.ae', phone: '+971 4 391 0000', ticket_type: 'General Admission', company: 'Atlas Cloud MENA', pass_code: 'GP-TC26-GA116', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_117', name: 'David K. Miller', email: 'dkmiller@wiredstandard.com', phone: '+1 (212) 993-4120', ticket_type: 'Press', company: 'The Wired Standard', pass_code: 'GP-TC26-PRS17', checked_in: 0, checked_in_at: null, gate: null, notes: '' },
+      { id: 'att_118', name: 'Rachel Green-Sloan', email: 'rchel.green@solarisenergy.org', phone: '+1 (720) 419-8802', ticket_type: 'General Admission', company: 'Solaris Energy', pass_code: 'GP-TC26-GA118', checked_in: 0, checked_in_at: null, gate: null, notes: '' }
+    ];
+
+    const INITIAL_LOGS = [
+      { id: 'log_1', pass_code: 'GP-TC26-GA110', attendee_name: 'Zoe Washington', ticket_type: 'General Admission', status: 'SUCCESS', gate: 'North Turnstile 2', scanned_at: '2026-10-24 09:44:28', notes: 'Initial entry verified' },
+      { id: 'log_2', pass_code: 'GP-TC26-GA109', attendee_name: 'Arjun Mehta', ticket_type: 'General Admission', status: 'SUCCESS', gate: 'North Turnstile 3', scanned_at: '2026-10-24 09:37:44', notes: 'Initial entry verified' },
+      { id: 'log_3', pass_code: 'GP-TC26-PRS08', attendee_name: 'Clara Johansson', ticket_type: 'Press', status: 'SUCCESS', gate: 'Media Desk Gate B', scanned_at: '2026-10-24 09:31:02', notes: 'Accredited press pass verified' },
+      { id: 'log_4', pass_code: 'GP-TC26-VIP02', attendee_name: 'Marcus Vance', ticket_type: 'VIP', status: 'ALREADY_CHECKED_IN', gate: 'North Turnstile 1', scanned_at: '2026-10-24 09:22:10', notes: 'Duplicate scan rejected. Previous entry at 08:50:33' },
+      { id: 'log_5', pass_code: 'GP-INVALID-88', attendee_name: 'Unknown', ticket_type: 'N/A', status: 'INVALID', gate: 'North Turnstile 3', scanned_at: '2026-10-24 09:35:40', notes: 'Pass code not recognized in system' }
+    ];
+
+    // --- Helpers ---
+    function getTicketBadge(type) {
+      switch (type) {
+        case 'VIP': return { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200', dot: 'bg-purple-500' };
+        case 'Speaker': return { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', dot: 'bg-indigo-500' };
+        case 'Sponsor': return { bg: 'bg-amber-50', text: 'text-amber-800', border: 'border-amber-200', dot: 'bg-amber-500' };
+        case 'Press': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500' };
+        default: return { bg: 'bg-slate-50', text: 'text-slate-700', border: 'border-slate-200', dot: 'bg-slate-500' };
+      }
+    }
+
+    function getInitials(name) {
+      if (!name) return 'GP';
+      const parts = name.trim().split(/\s+/);
+      if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+
+    // --- Main App Component ---
+    function App() {
+      const [currentTab, setCurrentTab] = useState('overview');
+      const [attendees, setAttendees] = useState(() => {
+        const saved = localStorage.getItem('gatepass_attendees');
+        return saved ? JSON.parse(saved) : INITIAL_ATTENDEES;
+      });
+      const [logs, setLogs] = useState(() => {
+        const saved = localStorage.getItem('gatepass_logs');
+        return saved ? JSON.parse(saved) : INITIAL_LOGS;
+      });
+
+      // Modals
+      const [viewingPass, setViewingPass] = useState(null);
+      const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+      const [editingAttendee, setEditingAttendee] = useState(null);
+      const [deletingAttendee, setDeletingAttendee] = useState(null);
+      const [toasts, setToasts] = useState([]);
+
+      useEffect(() => {
+        localStorage.setItem('gatepass_attendees', JSON.stringify(attendees));
+      }, [attendees]);
+
+      useEffect(() => {
+        localStorage.setItem('gatepass_logs', JSON.stringify(logs));
+      }, [logs]);
+
+      const addToast = (type, title, description) => {
+        const id = 'toast_' + Date.now();
+        setToasts(prev => [...prev, { id, type, title, description }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+      };
+
+      // Statistics dynamically derived from attendees array
+      const stats = useMemo(() => {
+        const total = attendees.length;
+        const checkedIn = attendees.filter(a => a.checked_in === 1).length;
+        const notArrived = total - checkedIn;
+        const rate = total > 0 ? Number(((checkedIn / total) * 100).toFixed(1)) : 0;
+
+        const tiers = ['General Admission', 'VIP', 'Speaker', 'Sponsor', 'Press'];
+        const breakdown = tiers.map(tier => {
+          const tierAttendees = attendees.filter(a => a.ticket_type === tier);
+          const tTotal = tierAttendees.length;
+          const tChecked = tierAttendees.filter(a => a.checked_in === 1).length;
+          return {
+            ticketType: tier,
+            total: tTotal,
+            checkedIn: tChecked,
+            notArrived: tTotal - tChecked,
+            rate: tTotal > 0 ? Number(((tChecked / tTotal) * 100).toFixed(1)) : 0
+          };
+        }).filter(b => b.total > 0);
+
+        const recentCheckIns = attendees
+          .filter(a => a.checked_in === 1 && a.checked_in_at)
+          .sort((a, b) => b.checked_in_at.localeCompare(a.checked_in_at))
+          .slice(0, 8);
+
+        return { total, checkedIn, notArrived, attendanceRate: rate, breakdown, recentCheckIns };
+      }, [attendees]);
+
+      // --- Check-In Verification Engine ---
+      const handleCheckInAttempt = (rawCode) => {
+        const cleanCode = (rawCode || '').trim();
+        if (!cleanCode) return { success: false, status: 'INVALID', message: 'No pass code provided.' };
+
+        // Parse JSON if QR encoded a JSON payload
+        let code = cleanCode;
+        if (cleanCode.startsWith('{') && cleanCode.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(cleanCode);
+            code = parsed.passCode || parsed.code || cleanCode;
+          } catch {}
+        }
+
+        const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        const match = attendees.find(a => a.pass_code.toUpperCase() === code.toUpperCase() || a.id === code);
+
+        if (!match) {
+          sound.playInvalid();
+          const logEntry = { id: 'log_' + Date.now(), pass_code: code, attendee_name: 'Unrecognized', ticket_type: 'N/A', status: 'INVALID', gate: 'Main Gate A', scanned_at: now, notes: 'Pass code not recognized in system' };
+          setLogs(prev => [logEntry, ...prev]);
+          return { success: false, status: 'INVALID', message: 'Invalid pass: Pass code was not recognized in the event roster.', passCode: code };
+        }
+
+        if (match.checked_in === 1) {
+          sound.playDuplicate();
+          const logEntry = { id: 'log_' + Date.now(), pass_code: match.pass_code, attendee_name: match.name, ticket_type: match.ticket_type, status: 'ALREADY_CHECKED_IN', gate: 'Main Gate A', scanned_at: now, notes: `Duplicate scan rejected. Original entry recorded at ${match.checked_in_at || 'earlier'}` };
+          setLogs(prev => [logEntry, ...prev]);
+          return { success: false, status: 'ALREADY_CHECKED_IN', attendee: match, previousCheckInTime: match.checked_in_at, previousGate: match.gate || 'Main Gate A', message: `Warning: This pass has already been used at ${match.checked_in_at || 'earlier time'}.` };
+        }
+
+        // Valid Check-In: Atomic state update
+        sound.playSuccess();
+        const updated = { ...match, checked_in: 1, checked_in_at: now, gate: 'Main Gate A' };
+        setAttendees(prev => prev.map(a => a.id === match.id ? updated : a));
+        const logEntry = { id: 'log_' + Date.now(), pass_code: match.pass_code, attendee_name: match.name, ticket_type: match.ticket_type, status: 'SUCCESS', gate: 'Main Gate A', scanned_at: now, notes: 'Valid pass verified' };
+        setLogs(prev => [logEntry, ...prev]);
+        addToast('success', 'Check-In Confirmed', `${match.name} (${match.ticket_type})`);
+        return { success: true, status: 'SUCCESS', attendee: updated, checkInTime: now, message: `Check-in confirmed for ${match.name} (${match.ticket_type}).` };
+      };
+
+      const handleUndoCheckIn = (attendeeId) => {
+        const att = attendees.find(a => a.id === attendeeId);
+        if (!att) return;
+        setAttendees(prev => prev.map(a => a.id === attendeeId ? { ...a, checked_in: 0, checked_in_at: null, gate: null } : a));
+        addToast('info', 'Check-In Reverted', `Marked ${att.name} as not yet arrived.`);
+      };
+
+      const handleSaveAttendee = (data) => {
+        const cleanEmail = data.email.trim().toLowerCase();
+        // Check duplicate email
+        const exists = attendees.find(a => a.email.toLowerCase() === cleanEmail && (!editingAttendee || a.id !== editingAttendee.id));
+        if (exists) {
+          throw new Error(`An attendee with email "${cleanEmail}" is already registered (${exists.name}).`);
+        }
+
+        if (editingAttendee) {
+          setAttendees(prev => prev.map(a => a.id === editingAttendee.id ? { ...a, ...data, email: cleanEmail } : a));
+          addToast('success', 'Attendee Updated', data.name);
+        } else {
+          const rand = Math.random().toString(36).substring(2, 7).toUpperCase();
+          const newAtt = {
+            id: 'att_' + Date.now(),
+            ...data,
+            email: cleanEmail,
+            pass_code: `GP-TC26-${rand}`,
+            checked_in: 0,
+            checked_in_at: null,
+            gate: null,
+            created_at: new Date().toISOString()
+          };
+          setAttendees(prev => [newAtt, ...prev]);
+          addToast('success', 'Pass Issued', `${data.name} (${newAtt.pass_code})`);
+        }
+      };
+
+      const handleDeleteAttendee = () => {
+        if (!deletingAttendee) return;
+        setAttendees(prev => prev.filter(a => a.id !== deletingAttendee.id));
+        addToast('info', 'Registration Deleted', deletingAttendee.name);
+        setDeletingAttendee(null);
+      };
+
+      const handleResetDemoData = () => {
+        setAttendees(INITIAL_ATTENDEES);
+        setLogs(INITIAL_LOGS);
+        addToast('success', 'Baseline Restored', 'Reset to initial 18 attendees and baseline stats.');
+      };
+
+      const handleExportAttendeesCSV = () => {
+        const headers = ['Attendee ID', 'Name', 'Email', 'Phone', 'Ticket Type', 'Company', 'Pass Code', 'Status', 'Check-In Time', 'Gate'];
+        const rows = attendees.map(a => [
+          a.id, `"${a.name}"`, `"${a.email}"`, `"${a.phone || ''}"`, `"${a.ticket_type}"`, `"${a.company || ''}"`, a.pass_code, a.checked_in === 1 ? 'Checked In' : 'Not Arrived', a.checked_in_at || 'N/A', a.gate || 'N/A'
+        ]);
+        const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
+        downloadFile(csv, 'gatepass-attendees-techconnect.csv', 'text/csv');
+      };
+
+      const handleExportLogsCSV = () => {
+        const headers = ['Log ID', 'Timestamp', 'Status', 'Pass Code', 'Attendee', 'Ticket Type', 'Gate', 'Audit Notes'];
+        const rows = logs.map(l => [
+          l.id, l.scanned_at, l.status, l.pass_code, `"${l.attendee_name || ''}"`, `"${l.ticket_type || ''}"`, `"${l.gate || ''}"`, `"${l.notes || ''}"`
+        ]);
+        const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
+        downloadFile(csv, 'gatepass-checkin-logs-techconnect.csv', 'text/csv');
+      };
+
+      function downloadFile(content, fileName, contentType) {
+        const a = document.createElement('a');
+        const file = new Blob([content], { type: contentType });
+        a.href = URL.createObjectURL(file);
+        a.download = fileName;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      return (
+        <div className="flex h-screen overflow-hidden bg-brand-bg text-brand-text">
+          {/* Left Sidebar */}
+          <aside className="w-64 bg-brand-navy text-white flex flex-col h-full border-r border-brand-navy-light select-none flex-shrink-0 hidden md:flex">
+            <div className="p-5 border-b border-brand-navy-light/60">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-9 h-9 rounded-lg bg-brand-blue flex items-center justify-center shadow-sm">
+                  <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                    <rect width="18" height="18" x="3" y="3" rx="3" /><rect width="4" height="4" x="7" y="7" /><rect width="4" height="4" x="13" y="7" /><rect width="4" height="4" x="7" y="13" /><path d="M13 13h4v4" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-bold text-base tracking-tight leading-none text-white flex items-center gap-1.5">
+                    GatePass <span className="text-[10px] bg-brand-blue/30 text-blue-200 px-1.5 py-0.5 rounded font-mono">STANDALONE</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 tracking-tight mt-0.5">Every entry, accounted for.</p>
+                </div>
+              </div>
+            </div>
+
+            <nav className="flex-1 px-3 py-4 space-y-1">
+              {[
+                { id: 'overview', label: 'Overview', icon: 'M3 3h7v9H3zm11 0h7v5h-7zm0 9h7v9h-7zM3 16h7v5H3z' },
+                { id: 'attendees', label: 'Attendees', icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M22 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75', badge: attendees.length },
+                { id: 'scanner', label: 'Check-In Scanner', icon: 'M3 7V5a2 2 0 0 1 2-2h2 M17 3h2a2 2 0 0 1 2 2v2 M21 17v2a2 2 0 0 1-2 2h-2 M7 21H5a2 2 0 0 1-2-2v-2', highlight: true },
+                { id: 'reports', label: 'Attendance Reports', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8' },
+                { id: 'settings', label: 'Settings', icon: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z' },
+              ].map(item => {
+                const isActive = currentTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setCurrentTab(item.id)}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                      isActive ? 'bg-brand-blue text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-brand-navy-light/70'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-3">
+                      <svg className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                      </svg>
+                      <span>{item.label}</span>
+                    </div>
+                    {item.badge !== undefined && (
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full font-mono font-medium ${isActive ? 'bg-white/20 text-white' : 'bg-brand-navy-light text-slate-300'}`}>
+                        {item.badge}
+                      </span>
+                    )}
+                    {item.highlight && !isActive && (
+                      <span className="flex h-2 w-2 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="p-3.5 border-t border-brand-navy-light/60 bg-brand-navy-dark/40">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-full bg-slate-700 text-white font-semibold text-xs flex items-center justify-center">SC</div>
+                  <div className="truncate">
+                    <div className="text-xs font-semibold text-white truncate">Sarah Chen</div>
+                    <div className="text-[11px] text-slate-400 truncate">Lead Event Ops</div>
+                  </div>
+                </div>
+                <span className="text-[10px] text-emerald-400 font-mono">GATE 1</span>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Layout */}
+          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            {/* Top Bar */}
+            <header className="h-16 bg-white border-b border-brand-border px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20">
+              <div className="flex items-center space-x-3">
+                <span className="font-bold text-sm text-brand-text">TechConnect 2026</span>
+                <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span> Check-In Open
+                </span>
+                <span className="hidden md:inline text-xs text-slate-400">• Metropolitan Convention Center • Oct 24, 2026</span>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setCurrentTab('scanner')}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold bg-brand-blue hover:bg-brand-blue-hover text-white transition-colors shadow-sm"
+                >
+                  <span>Scan Pass</span>
+                </button>
+                <button
+                  onClick={() => { setEditingAttendee(null); setIsAddModalOpen(true); }}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium border border-brand-border bg-white hover:bg-slate-50 text-slate-700 transition-colors"
+                >
+                  <span>+ Add Attendee</span>
+                </button>
+              </div>
+            </header>
+
+            {/* Tab Views */}
+            <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+              {currentTab === 'overview' && (
+                <div className="space-y-6">
+                  {/* 4 KPIs */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Total Registrations</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-brand-text">{stats.total}</span>
+                        <span className="text-xs text-slate-400">100% Roster</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Checked In</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-emerald-600">{stats.checkedIn}</span>
+                        <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Inside Venue</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Not Yet Arrived</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-amber-700">{stats.notArrived}</span>
+                        <span className="text-xs text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Pending</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Attendance Rate</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-brand-blue">{stats.attendanceRate}%</span>
+                        <span className="text-xs text-slate-400">Live Quorum</span>
+                      </div>
+                      <div className="mt-3 w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-brand-blue h-full rounded-full transition-all duration-500" style={{ width: `${stats.attendanceRate}%` }}></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Main Grid */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2 space-y-6">
+                      {/* Ticket Tier Breakdown */}
+                      <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm">
+                        <h3 className="text-sm font-semibold text-brand-text mb-4">Turnout by Ticket Tier</h3>
+                        <div className="space-y-3.5">
+                          {stats.breakdown.map(item => (
+                            <div key={item.ticketType} className="space-y-1.5">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-medium text-slate-700">{item.ticketType}</span>
+                                <span className="font-mono text-slate-500">{item.checkedIn} / {item.total} ({item.rate}%)</span>
+                              </div>
+                              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                <div className="bg-brand-blue h-full rounded-full" style={{ width: `${item.rate}%` }}></div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Event Logistics */}
+                      <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Venue Location</div>
+                          <div className="font-semibold text-brand-text mt-1">{BASELINE_EVENT.venue}</div>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Operational Date</div>
+                          <div className="font-semibold text-brand-text mt-1">{BASELINE_EVENT.date_str}</div>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Doors Open</div>
+                          <div className="font-semibold text-brand-text mt-1">{BASELINE_EVENT.doors_open}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right column: Recent activity */}
+                    <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm flex flex-col">
+                      <h3 className="text-sm font-semibold text-brand-text pb-3 border-b border-brand-border">Recent Check-In Activity</h3>
+                      <div className="divide-y divide-slate-100 flex-1 overflow-y-auto max-h-[460px]">
+                        {stats.recentCheckIns.map(item => (
+                          <div key={item.id} className="py-2.5 flex items-center justify-between text-xs">
+                            <div>
+                              <div className="font-semibold text-brand-text">{item.name}</div>
+                              <div className="text-[11px] text-slate-500">{item.ticket_type} • {item.gate || 'Main Gate'}</div>
+                            </div>
+                            <span className="font-mono text-[11px] text-slate-400">{item.checked_in_at.split(' ')[1] || item.checked_in_at}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Attendees Tab */}
+              {currentTab === 'attendees' && (
+                <AttendeesView
+                  attendees={attendees}
+                  onViewPass={(att) => setViewingPass(att)}
+                  onEdit={(att) => { setEditingAttendee(att); setIsAddModalOpen(true); }}
+                  onDelete={(att) => setDeletingAttendee(att)}
+                  onToggleCheckIn={(att) => {
+                    if (att.checked_in === 1) handleUndoCheckIn(att.id);
+                    else handleCheckInAttempt(att.pass_code);
+                  }}
+                  onOpenAdd={() => { setEditingAttendee(null); setIsAddModalOpen(true); }}
+                />
+              )}
+
+              {/* Scanner Tab */}
+              {currentTab === 'scanner' && (
+                <ScannerView
+                  onCheckIn={handleCheckInAttempt}
+                  onViewPass={(att) => setViewingPass(att)}
+                />
+              )}
+
+              {/* Reports Tab */}
+              {currentTab === 'reports' && (
+                <ReportsView
+                  stats={stats}
+                  logs={logs}
+                  onExportAttendees={handleExportAttendeesCSV}
+                  onExportLogs={handleExportLogsCSV}
+                />
+              )}
+
+              {/* Settings Tab */}
+              {currentTab === 'settings' && (
+                <SettingsView onResetBaseline={handleResetDemoData} />
+              )}
+            </main>
+          </div>
+
+          {/* Pass Modal */}
+          {viewingPass && (
+            <PassModal
+              attendee={viewingPass}
+              event={BASELINE_EVENT}
+              onClose={() => setViewingPass(null)}
+            />
+          )}
+
+          {/* Add/Edit Modal */}
+          {isAddModalOpen && (
+            <AttendeeFormModal
+              initialData={editingAttendee}
+              onClose={() => { setIsAddModalOpen(false); setEditingAttendee(null); }}
+              onSave={handleSaveAttendee}
+            />
+          )}
+
+          {/* Delete Confirm Modal */}
+          {deletingAttendee && (
+            <ConfirmModal
+              title="Delete Attendee Registration"
+              message={`Are you sure you want to revoke registration for ${deletingAttendee.name}?`}
+              onConfirm={handleDeleteAttendee}
+              onClose={() => setDeletingAttendee(null)}
+            />
+          )}
+
+          {/* Toast Container */}
+          <div className="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none">
+            {toasts.map(t => (
+              <div key={t.id} className={`pointer-events-auto p-3.5 rounded-xl border shadow-lg text-xs ${t.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : t.type === 'error' ? 'bg-red-50 border-red-200 text-red-950' : 'bg-blue-50 border-blue-200 text-blue-950'}`}>
+                <div className="font-bold">{t.title}</div>
+                {t.description && <div className="mt-0.5">{t.description}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- Sub-Components ---
+    function AttendeesView({ attendees, onViewPass, onEdit, onDelete, onToggleCheckIn, onOpenAdd }) {
+      const [search, setSearch] = useState('');
+      const [status, setStatus] = useState('all');
+      const [tier, setTier] = useState('all');
+
+      const filtered = attendees.filter(a => {
+        const matchesSearch = !search || a.name.toLowerCase().includes(search.toLowerCase()) || a.email.toLowerCase().includes(search.toLowerCase()) || a.pass_code.toLowerCase().includes(search.toLowerCase());
+        const matchesStatus = status === 'all' || (status === 'checked_in' ? a.checked_in === 1 : a.checked_in === 0);
+        const matchesTier = tier === 'all' || a.ticket_type === tier;
+        return matchesSearch && matchesStatus && matchesTier;
+      });
+
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white p-3.5 rounded-xl border border-brand-border shadow-sm">
+            <input
+              type="text"
+              placeholder="Search name, email, or pass code..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="px-3 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg flex-1"
+            />
+            <div className="flex items-center space-x-2">
+              <select value={status} onChange={e => setStatus(e.target.value)} className="px-2.5 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg">
+                <option value="all">All Statuses</option>
+                <option value="checked_in">Checked In</option>
+                <option value="not_arrived">Not Arrived</option>
+              </select>
+              <select value={tier} onChange={e => setTier(e.target.value)} className="px-2.5 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg">
+                <option value="all">All Tiers</option>
+                <option value="General Admission">General Admission</option>
+                <option value="VIP">VIP</option>
+                <option value="Speaker">Speaker</option>
+                <option value="Sponsor">Sponsor</option>
+                <option value="Press">Press</option>
+              </select>
+              <button onClick={onOpenAdd} className="px-3 py-1.5 bg-brand-blue text-white rounded-lg text-xs font-semibold whitespace-nowrap">+ Add</button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-brand-border shadow-sm overflow-hidden">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 border-b border-brand-border uppercase text-[10px] text-slate-500 font-semibold">
+                <tr>
+                  <th className="p-3">Attendee</th>
+                  <th className="p-3">Contact</th>
+                  <th className="p-3">Tier</th>
+                  <th className="p-3">Pass Code</th>
+                  <th className="p-3">Status</th>
+                  <th className="p-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-brand-border">
+                {filtered.map(a => {
+                  const badge = getTicketBadge(a.ticket_type);
+                  return (
+                    <tr key={a.id} className="hover:bg-slate-50">
+                      <td className="p-3 font-semibold text-brand-text">
+                        <div>{a.name}</div>
+                        <div className="text-[11px] text-slate-400 font-normal">{a.company || 'Individual'}</div>
+                      </td>
+                      <td className="p-3 text-slate-600">{a.email}</td>
+                      <td className="p-3">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${badge.bg} ${badge.text} ${badge.border}`}>
+                          {a.ticket_type}
+                        </span>
+                      </td>
+                      <td className="p-3 font-mono font-bold text-slate-700">{a.pass_code}</td>
+                      <td className="p-3">
+                        {a.checked_in === 1 ? (
+                          <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 text-[10px]">Checked In</span>
+                        ) : (
+                          <span className="text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full text-[10px]">Not Arrived</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-right space-x-1 whitespace-nowrap">
+                        <button onClick={() => onViewPass(a)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-[11px] font-medium">QR Pass</button>
+                        <button onClick={() => onToggleCheckIn(a)} className={`px-2 py-1 rounded text-[11px] font-medium ${a.checked_in === 1 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                          {a.checked_in === 1 ? 'Undo' : 'Check In'}
+                        </button>
+                        <button onClick={() => onEdit(a)} className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded text-[11px]">Edit</button>
+                        <button onClick={() => onDelete(a)} className="px-2 py-1 text-red-600 hover:bg-red-50 rounded text-[11px]">Delete</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    function ScannerView({ onCheckIn, onViewPass }) {
+      const [manualCode, setManualCode] = useState('');
+      const [result, setResult] = useState(null);
+      const [soundMuted, setSoundMuted] = useState(false);
+
+      const handleScan = (code) => {
+        const res = onCheckIn(code);
+        setResult(res);
+      };
+
+      return (
+        <div className="space-y-6 max-w-4xl mx-auto">
+          <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-bold text-brand-text">Entrance Check-In Terminal</h2>
+              <p className="text-xs text-slate-500">Scan credentials via camera or enter pass code manually</p>
+            </div>
+            <button
+              onClick={() => { setSoundMuted(!soundMuted); sound.enabled = soundMuted; }}
+              className="text-xs px-3 py-1.5 border border-brand-border rounded-lg bg-slate-50 text-slate-700 font-medium"
+            >
+              {soundMuted ? 'Muted' : 'Audio Chime ON'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Input Side */}
+            <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm space-y-4">
+              <h3 className="text-sm font-semibold text-brand-text">Pass Code Verification</h3>
+              <form onSubmit={e => { e.preventDefault(); handleScan(manualCode); setManualCode(''); }}>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Enter pass code (e.g. GP-TC26-GA113)"
+                    value={manualCode}
+                    onChange={e => setManualCode(e.target.value)}
+                    className="w-full px-3 py-2.5 text-sm font-mono font-bold uppercase tracking-wider bg-slate-50 border border-brand-border rounded-lg"
+                    autoFocus
+                  />
+                  <button type="submit" className="mt-2 w-full py-2 bg-brand-blue text-white rounded-lg text-xs font-semibold shadow-sm">
+                    Verify & Check In
+                  </button>
+                </div>
+              </form>
+
+              <div className="pt-3 border-t border-slate-100">
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Quick Test Passes</div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <button onClick={() => handleScan('GP-TC26-GA113')} className="px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded text-xs font-mono">
+                    Valid: Lucas Bernard
+                  </button>
+                  <button onClick={() => handleScan('GP-TC26-SPK01')} className="px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded text-xs font-mono">
+                    Duplicate: Elena Rostova
+                  </button>
+                  <button onClick={() => handleScan('GP-FAKE-CODE')} className="px-2.5 py-1 bg-red-50 text-red-800 border border-red-200 rounded text-xs font-mono">
+                    Invalid Code
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Result Side */}
+            <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm flex flex-col justify-center min-h-[260px]">
+              {!result ? (
+                <div className="text-center text-slate-400 text-xs py-8">
+                  Awaiting credential scan. Enter pass code on the left to verify entry.
+                </div>
+              ) : result.status === 'SUCCESS' ? (
+                <div className="p-4 bg-status-success-bg border border-status-success-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-success-text text-sm">ENTRY VERIFIED & CHECKED IN</div>
+                  <div className="text-base font-bold text-slate-900">{result.attendee.name}</div>
+                  <div className="text-xs text-slate-600">{result.attendee.ticket_type} • Pass: {result.attendee.pass_code}</div>
+                  <div className="text-[11px] text-emerald-800 font-mono">Timestamp: {result.checkInTime}</div>
+                </div>
+              ) : result.status === 'ALREADY_CHECKED_IN' ? (
+                <div className="p-4 bg-status-warning-bg border border-status-warning-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-warning-text text-sm">PASS ALREADY USED (DUPLICATE)</div>
+                  <div className="text-base font-bold text-slate-900">{result.attendee.name}</div>
+                  <div className="text-xs text-amber-900">Previously checked in at: {result.previousCheckInTime}</div>
+                  <div className="text-[11px] text-slate-500 italic">Duplicate re-entry has been blocked.</div>
+                </div>
+              ) : (
+                <div className="p-4 bg-status-error-bg border border-status-error-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-error-text text-sm">INVALID PASS IDENTIFIER</div>
+                  <div className="text-xs text-red-900">{result.message}</div>
+                  <div className="font-mono text-xs text-slate-700 bg-white p-2 rounded border border-red-200">{result.passCode}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ReportsView({ stats, logs, onExportAttendees, onExportLogs }) {
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-brand-text">Attendance Reports & Audits</h2>
+              <p className="text-xs text-slate-500">Live reconciliation and exportable CSV compliance records</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button onClick={onExportAttendees} className="px-3 py-1.5 bg-white border border-brand-border rounded-lg text-xs font-semibold text-slate-700 shadow-sm">
+                Export Attendees CSV
+              </button>
+              <button onClick={onExportLogs} className="px-3 py-1.5 bg-brand-navy text-white rounded-lg text-xs font-semibold shadow-sm">
+                Export Audit Logs CSV
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-brand-border shadow-sm p-4">
+            <h3 className="text-sm font-semibold text-brand-text mb-3">Entrance Audit Logs</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-brand-border text-[10px] text-slate-500 uppercase font-semibold">
+                  <tr>
+                    <th className="p-2.5">Time</th>
+                    <th className="p-2.5">Status</th>
+                    <th className="p-2.5">Attendee</th>
+                    <th className="p-2.5">Pass Code</th>
+                    <th className="p-2.5">Gate</th>
+                    <th className="p-2.5">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-brand-border">
+                  {logs.map(l => (
+                    <tr key={l.id} className="hover:bg-slate-50">
+                      <td className="p-2.5 font-mono text-[11px] text-slate-400">{l.scanned_at}</td>
+                      <td className="p-2.5">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${l.status === 'SUCCESS' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : l.status === 'ALREADY_CHECKED_IN' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                          {l.status}
+                        </span>
+                      </td>
+                      <td className="p-2.5 font-semibold text-brand-text">{l.attendee_name}</td>
+                      <td className="p-2.5 font-mono">{l.pass_code}</td>
+                      <td className="p-2.5 text-slate-500">{l.gate}</td>
+                      <td className="p-2.5 text-slate-500">{l.notes}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function SettingsView({ onResetBaseline }) {
+      return (
+        <div className="space-y-6 max-w-2xl mx-auto">
+          <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm">
+            <h2 className="text-base font-bold text-brand-text">System & Storage Settings</h2>
+            <p className="text-xs text-slate-500 mt-0.5">Configuration details and browser persistence state</p>
+
+            <div className="mt-4 space-y-2 text-xs">
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex justify-between">
+                <span>Storage Mode:</span>
+                <span className="font-mono font-bold text-brand-blue">Local In-Browser Storage</span>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex justify-between">
+                <span>Anti-Passback Duplicate Enforcement:</span>
+                <span className="font-mono font-bold text-emerald-700">ACTIVE</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-xl border border-red-200 shadow-sm">
+            <h3 className="text-sm font-bold text-red-900">Reset Demo Data</h3>
+            <p className="text-xs text-slate-600 mt-1">Restore baseline 18 attendees and initial check-in records.</p>
+            <button
+              onClick={() => { if (confirm('Reset to initial demo state?')) onResetBaseline(); }}
+              className="mt-3 px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm"
+            >
+              Reset Baseline Data
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function PassModal({ attendee, event, onClose }) {
+      const qrContainerRef = useRef(null);
+
+      useEffect(() => {
+        if (qrContainerRef.current) {
+          qrContainerRef.current.innerHTML = '';
+          new QRCode(qrContainerRef.current, {
+            text: JSON.stringify({ passCode: attendee.pass_code, attendeeId: attendee.id, name: attendee.name }),
+            width: 140,
+            height: 140,
+            colorDark: "#000000",
+            colorLight: "#ffffff",
+            correctLevel: QRCode.CorrectLevel.H
+          });
+        }
+      }, [attendee]);
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-2xl max-w-md w-full overflow-hidden">
+            <div id="printable-ticket" className="p-5">
+              <div className="bg-brand-navy text-white p-4 rounded-t-xl">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold">GatePass Official Ticket</span>
+                  <span className="px-2 py-0.5 rounded bg-brand-blue font-semibold">{attendee.ticket_type}</span>
+                </div>
+                <div className="text-lg font-bold mt-2">{event.name}</div>
+                <div className="text-xs text-slate-300 mt-0.5">{event.date_str} • {event.venue}</div>
+              </div>
+
+              <div className="p-4 border border-t-0 border-brand-border rounded-b-xl flex flex-col items-center">
+                <div ref={qrContainerRef} className="p-2 border rounded-lg bg-white my-2"></div>
+                <div className="font-mono font-bold text-base mt-2">{attendee.pass_code}</div>
+                <div className="text-base font-bold text-brand-text mt-1">{attendee.name}</div>
+                <div className="text-xs text-slate-500">{attendee.email}</div>
+                <div className="text-[11px] text-slate-400 mt-1 font-mono">Status: {attendee.checked_in === 1 ? 'Checked In' : 'Not Arrived'}</div>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-between">
+              <button onClick={() => window.print()} className="px-3 py-1.5 bg-brand-navy text-white rounded-lg text-xs font-semibold">Print Badge</button>
+              <button onClick={onClose} className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 rounded-lg text-xs font-semibold">Close</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AttendeeFormModal({ initialData, onClose, onSave }) {
+      const [name, setName] = useState(initialData ? initialData.name : '');
+      const [email, setEmail] = useState(initialData ? initialData.email : '');
+      const [ticketType, setTicketType] = useState(initialData ? initialData.ticket_type : 'General Admission');
+      const [company, setCompany] = useState(initialData ? initialData.company : '');
+      const [error, setError] = useState('');
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        setError('');
+        if (!name.trim()) return setError('Name is required.');
+        if (!email.trim() || !email.includes('@')) return setError('Valid email is required.');
+        try {
+          onSave({ name: name.trim(), email: email.trim(), ticket_type: ticketType, company: company.trim() });
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-xl max-w-md w-full p-5">
+            <h3 className="text-base font-bold text-brand-text">{initialData ? 'Edit Attendee' : 'Register Attendee'}</h3>
+            {error && <div className="mt-2 p-2 bg-red-50 text-red-700 text-xs rounded border border-red-200">{error}</div>}
+            <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="font-semibold block mb-1">Full Name *</label>
+                <input type="text" required value={name} onChange={e => setName(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Email *</label>
+                <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Ticket Tier</label>
+                <select value={ticketType} onChange={e => setTicketType(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50">
+                  <option value="General Admission">General Admission</option>
+                  <option value="VIP">VIP</option>
+                  <option value="Speaker">Speaker</option>
+                  <option value="Sponsor">Sponsor</option>
+                  <option value="Press">Press</option>
+                </select>
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Company / Organization</label>
+                <input type="text" value={company} onChange={e => setCompany(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-lg border text-slate-600">Cancel</button>
+                <button type="submit" className="px-4 py-1.5 bg-brand-blue text-white rounded-lg font-semibold">Save Attendee</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function ConfirmModal({ title, message, onConfirm, onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-xl max-w-sm w-full p-5 space-y-3">
+            <h3 className="text-base font-bold text-red-700">{title}</h3>
+            <p className="text-xs text-slate-600 leading-relaxed">{message}</p>
+            <div className="pt-2 flex justify-end space-x-2">
+              <button onClick={onClose} className="px-3 py-1.5 rounded-lg border text-slate-600 text-xs">Cancel</button>
+              <button onClick={onConfirm} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-semibold">Confirm Delete</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
