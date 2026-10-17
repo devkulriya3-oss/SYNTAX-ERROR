@@ -1,10 +1,16 @@
 Buildathon Project by Team SYNTAX ERROR at PVGCOET
 
+
 ## Team
+
 Dev Kulriya
+
 Avadhoot Jagtap
+
 Virendra Kakade
+
 Shravan Mhetre
+
 
 ## Project Links:
 -Live Project: https://syntax-error-5nzh.onrender.com/
