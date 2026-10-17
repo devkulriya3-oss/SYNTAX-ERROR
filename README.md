@@ -92,7 +92,3 @@ GatePass is a web-based event management and QR check-in platform that helps org
 - Digital ticket generation.
 - CSV reporting and audit logs.
 - Persistent database storage.
-
-## 📄 License
-
-MIT
