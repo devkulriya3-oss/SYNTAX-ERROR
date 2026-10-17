@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GatePass — QR Event Check-In Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              navy: '#17243A',
+              'navy-light': '#1E2E4A',
+              'navy-dark': '#0F1726',
+              blue: '#4263EB',
+              'blue-hover': '#364FC7',
+              bg: '#F7F8FA',
+              border: '#E2E8F0',
+              text: '#0F172A',
+            },
+            status: {
+              'success-bg': '#ECFDF5',
+              'success-border': '#A7F3D0',
+              'success-text': '#065F46',
+              'warning-bg': '#FFFBEB',
+              'warning-border': '#FDE68A',
+              'warning-text': '#92400E',
+              'error-bg': '#FEF2F2',
+              'error-border': '#FECACA',
+              'error-text': '#991B1B',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18, ReactDOM & Babel for in-browser execution -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Lucide Icons & HTML5-QRCode -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <!-- QRCode Generator -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #F7F8FA; color: #0F172A; }
+    @media print {
+      body { background-color: white !important; }
+      aside, header, nav, button, .no-print { display: none !important; }
+      #printable-ticket { display: block !important; position: absolute; left: 0; top: 0; width: 100%; border: 1px solid #ccc; }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // --- Web Audio API Feedback ---
+    class SoundEngine {
+      constructor() {
+        this.enabled = true;
+        this.ctx = null;
+      }
+      getCtx() {
+        if (!this.enabled) return null;
+        try {
+          if (!this.ctx) {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (AudioCtx) this.ctx = new AudioCtx();
+          }
+          if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+          return this.ctx;
+        } catch { return null; }
+      }
+      playSuccess() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(659.25, now);
+        osc.frequency.setValueAtTime(880.00, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      }
+      playDuplicate() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.setValueAtTime(370, now + 0.12);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.3);
+      }
+      playInvalid() {
+        const ctx = this.getCtx();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        osc.frequency.setValueAtTime(196, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.4);
+      }
+    }
+    const sound = new SoundEngine();
+
+    // --- Baseline Demo Data ---
+    const DEMO_EVENT_ID = 'evt_techconnect_2026';
+    function fmtEventDate(ev) {
+      if (!ev || !ev.event_date) return '';
+      const d = new Date(ev.event_date + 'T00:00:00');
+      return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    function fmtEventTime(ev) {
+      if (!ev || !ev.event_time) return '';
+      const [h, m] = ev.event_time.split(':').map(Number);
+      return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+    }
+
+    // --- Helpers ---
+    function getTicketBadge(type) {
+      switch (type) {
+        case 'VIP': return { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200', dot: 'bg-purple-500' };
+        case 'Speaker': return { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200', dot: 'bg-indigo-500' };
+        case 'Sponsor': return { bg: 'bg-amber-50', text: 'text-amber-800', border: 'border-amber-200', dot: 'bg-amber-500' };
+        case 'Press': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500' };
+        default: return { bg: 'bg-slate-50', text: 'text-slate-700', border: 'border-slate-200', dot: 'bg-slate-500' };
+      }
+    }
+
+    function getInitials(name) {
+      if (!name) return 'GP';
+      const parts = name.trim().split(/\s+/);
+      if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+
+    // --- Backend API client ---
+    async function api(path, opts = {}) {
+      const res = await fetch('/api' + path, {
+        method: opts.method || 'GET',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: opts.body ? JSON.stringify(opts.body) : undefined
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && !path.startsWith('/auth/')) {
+        window.dispatchEvent(new Event('gp-unauth'));
+        throw new Error('Your session has expired. Please sign in again.');
+      }
+      if (!res.ok) throw new Error(data.error || 'Request failed (' + res.status + ')');
+      return data;
+    }
+    const exportUrl = (name, eventId) => '/api/export/' + name + '?event=' + encodeURIComponent(eventId || '');
+
+    // --- Main App Component ---
+    function ManagerApp({ user, onLogout }) {
+      const [currentTab, setCurrentTab] = useState('overview');
+      const [attendees, setAttendees] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [events, setEvents] = useState([]);
+      const [eventsLoaded, setEventsLoaded] = useState(false);
+      const [activeEventId, setActiveEventId] = useState(() => localStorage.getItem('gatepass_event') || '');
+      const [connected, setConnected] = useState(true);
+      const currentEvent = events.find(e => e.id === activeEventId) || null;
+
+      const refresh = async () => {
+        try {
+          const evs = await api('/events');
+          setEvents(evs); setEventsLoaded(true);
+          let id = activeEventId;
+          if (!evs.find(e => e.id === id)) {
+            id = evs.length ? evs[0].id : '';
+            if (id !== activeEventId) setActiveEventId(id);
+          }
+          if (id) {
+            const [a, l] = await Promise.all([api('/attendees?event=' + id), api('/logs?event=' + id)]);
+            setAttendees(a); setLogs(l);
+          } else { setAttendees([]); setLogs([]); }
+          setConnected(true);
+        } catch (e) { setConnected(false); }
+      };
+      useEffect(() => { refresh(); const t = setInterval(refresh, 5000); return () => clearInterval(t); }, [activeEventId]);
+      useEffect(() => { localStorage.setItem('gatepass_event', activeEventId); }, [activeEventId]);
+      useEffect(() => { if (eventsLoaded && events.length === 0) setCurrentTab('events'); }, [eventsLoaded, events.length]);
+      const selectEvent = (id) => { if (id === activeEventId) return; setAttendees([]); setLogs([]); setActiveEventId(id); };
+
+      // Modals
+      const [viewingPass, setViewingPass] = useState(null);
+      const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+      const [editingAttendee, setEditingAttendee] = useState(null);
+      const [deletingAttendee, setDeletingAttendee] = useState(null);
+      const [toasts, setToasts] = useState([]);
+
+      const addToast = (type, title, description) => {
+        const id = 'toast_' + Date.now();
+        setToasts(prev => [...prev, { id, type, title, description }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+      };
+
+      // Statistics dynamically derived from attendees array
+      const stats = useMemo(() => {
+        const total = attendees.length;
+        const checkedIn = attendees.filter(a => a.checked_in === 1).length;
+        const notArrived = total - checkedIn;
+        const rate = total > 0 ? Number(((checkedIn / total) * 100).toFixed(1)) : 0;
+
+        const tiers = ['General Admission', 'VIP', 'Speaker', 'Sponsor', 'Press'];
+        const breakdown = tiers.map(tier => {
+          const tierAttendees = attendees.filter(a => a.ticket_type === tier);
+          const tTotal = tierAttendees.length;
+          const tChecked = tierAttendees.filter(a => a.checked_in === 1).length;
+          return {
+            ticketType: tier,
+            total: tTotal,
+            checkedIn: tChecked,
+            notArrived: tTotal - tChecked,
+            rate: tTotal > 0 ? Number(((tChecked / tTotal) * 100).toFixed(1)) : 0
+          };
+        }).filter(b => b.total > 0);
+
+        const recentCheckIns = attendees
+          .filter(a => a.checked_in === 1 && a.checked_in_at)
+          .sort((a, b) => b.checked_in_at.localeCompare(a.checked_in_at))
+          .slice(0, 8);
+
+        return { total, checkedIn, notArrived, attendanceRate: rate, breakdown, recentCheckIns };
+      }, [attendees]);
+
+      // --- Handlers (all state lives in the server database) ---
+      const handleCheckInAttempt = async (rawCode) => {
+        try {
+          const res = await api('/checkin', { method: 'POST', body: { code: rawCode, gate: 'Main Gate A', event_id: activeEventId } });
+          if (res.status === 'SUCCESS') {
+            sound.playSuccess();
+            addToast('success', 'Check-In Confirmed', `${res.attendee.name} (${res.attendee.ticket_type})`);
+          } else if (res.status === 'ALREADY_CHECKED_IN') sound.playDuplicate();
+          else sound.playInvalid();
+          refresh();
+          return res;
+        } catch (e) {
+          addToast('error', 'Server error', e.message);
+          return { success: false, status: 'INVALID', message: 'Could not reach server: ' + e.message };
+        }
+      };
+
+      const handleUndoCheckIn = async (attendeeId) => {
+        try {
+          const att = await api(`/attendees/${attendeeId}/undo`, { method: 'POST' });
+          addToast('info', 'Check-In Reverted', `Marked ${att.name} as not yet arrived.`);
+          refresh();
+        } catch (e) { addToast('error', 'Undo failed', e.message); }
+      };
+
+      // Throws on failure so the form modal can show the message
+      const handleSaveAttendee = async (data) => {
+        if (editingAttendee) {
+          await api(`/attendees/${editingAttendee.id}`, { method: 'PUT', body: data });
+          addToast('success', 'Attendee Updated', data.name);
+        } else {
+          const created = await api('/attendees', { method: 'POST', body: { ...data, event_id: activeEventId } });
+          addToast('success', 'Pass Issued', `${created.name} (${created.pass_code})`);
+        }
+        refresh();
+      };
+
+      // Throws on failure so the event form can show the message
+      const handleSaveEvent = async (data, editingId) => {
+        if (editingId) {
+          await api(`/events/${editingId}`, { method: 'PUT', body: data });
+          addToast('success', 'Event Updated', data.name);
+          refresh();
+        } else {
+          const ev = await api('/events', { method: 'POST', body: data });
+          addToast('success', 'Event Created', ev.name);
+          setAttendees([]); setLogs([]); setActiveEventId(ev.id);
+        }
+      };
+
+      const handleDeleteEvent = async (ev) => {
+        try {
+          await api(`/events/${ev.id}`, { method: 'DELETE' });
+          addToast('info', 'Event Deleted', ev.name);
+          refresh();
+        } catch (e) { addToast('error', 'Delete failed', e.message); }
+      };
+
+      const handleDeleteAttendee = async () => {
+        if (!deletingAttendee) return;
+        try {
+          await api(`/attendees/${deletingAttendee.id}`, { method: 'DELETE' });
+          addToast('info', 'Registration Deleted', deletingAttendee.name);
+          refresh();
+        } catch (e) { addToast('error', 'Delete failed', e.message); }
+        setDeletingAttendee(null);
+      };
+
+      const handleResetDemoData = async () => {
+        try {
+          await api('/reset', { method: 'POST' });
+          addToast('success', 'Baseline Restored', 'Demo event restored to its initial 18 attendees.');
+          refresh();
+        } catch (e) { addToast('error', 'Reset failed', e.message); }
+      };
+
+      const handleExportAttendeesCSV = () => { window.location.href = exportUrl('attendees.csv', activeEventId); };
+      const handleExportLogsCSV = () => { window.location.href = exportUrl('logs.csv', activeEventId); };
+
+      function downloadFile(content, fileName, contentType) {
+        const a = document.createElement('a');
+        const file = new Blob([content], { type: contentType });
+        a.href = URL.createObjectURL(file);
+        a.download = fileName;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      return (
+        <div className="flex h-screen overflow-hidden bg-brand-bg text-brand-text">
+          {!connected && <div className="fixed top-0 inset-x-0 z-50 bg-red-600 text-white text-xs text-center py-1.5 font-medium">Cannot reach the GatePass server. Retrying...</div>}
+          {/* Left Sidebar */}
+          <aside className="w-64 bg-brand-navy text-white flex flex-col h-full border-r border-brand-navy-light select-none flex-shrink-0 hidden md:flex">
+            <div className="p-5 border-b border-brand-navy-light/60">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-9 h-9 rounded-lg bg-brand-blue flex items-center justify-center shadow-sm">
+                  <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                    <rect width="18" height="18" x="3" y="3" rx="3" /><rect width="4" height="4" x="7" y="7" /><rect width="4" height="4" x="13" y="7" /><rect width="4" height="4" x="7" y="13" /><path d="M13 13h4v4" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-bold text-base tracking-tight leading-none text-white flex items-center gap-1.5">
+                    GatePass <span className="text-[10px] bg-emerald-500/30 text-emerald-200 px-1.5 py-0.5 rounded font-mono">LIVE</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 tracking-tight mt-0.5">Every entry, accounted for.</p>
+                </div>
+              </div>
+            </div>
+
+            <nav className="flex-1 px-3 py-4 space-y-1">
+              {[
+                { id: 'events', label: 'Events', icon: 'M8 2v4 M16 2v4 M3 10h18 M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z', badge: events.length },
+                { id: 'overview', label: 'Overview', icon: 'M3 3h7v9H3zm11 0h7v5h-7zm0 9h7v9h-7zM3 16h7v5H3z' },
+                { id: 'attendees', label: 'Attendees', icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M22 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75', badge: attendees.length },
+                { id: 'scanner', label: 'Check-In Scanner', icon: 'M3 7V5a2 2 0 0 1 2-2h2 M17 3h2a2 2 0 0 1 2 2v2 M21 17v2a2 2 0 0 1-2 2h-2 M7 21H5a2 2 0 0 1-2-2v-2', highlight: true },
+                { id: 'reports', label: 'Attendance Reports', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8' },
+                { id: 'settings', label: 'Settings', icon: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z' },
+              ].map(item => {
+                const isActive = currentTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setCurrentTab(item.id)}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                      isActive ? 'bg-brand-blue text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-brand-navy-light/70'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-3">
+                      <svg className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                      </svg>
+                      <span>{item.label}</span>
+                    </div>
+                    {item.badge !== undefined && (
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full font-mono font-medium ${isActive ? 'bg-white/20 text-white' : 'bg-brand-navy-light text-slate-300'}`}>
+                        {item.badge}
+                      </span>
+                    )}
+                    {item.highlight && !isActive && (
+                      <span className="flex h-2 w-2 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="p-3.5 border-t border-brand-navy-light/60 bg-brand-navy-dark/40">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-full bg-slate-700 text-white font-semibold text-xs flex items-center justify-center flex-shrink-0">{getInitials(user.name)}</div>
+                  <div className="truncate">
+                    <div className="text-xs font-semibold text-white truncate">{user.name}</div>
+                    <div className="text-[11px] text-slate-400 truncate">Event Manager</div>
+                  </div>
+                </div>
+                <button onClick={onLogout} className="text-[11px] text-slate-300 hover:text-white underline flex-shrink-0 ml-2">Log out</button>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Layout */}
+          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            {/* Top Bar */}
+            <header className="h-16 bg-white border-b border-brand-border px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20">
+              <div className="flex items-center space-x-3">
+                {events.length > 0 ? (
+                  <select value={activeEventId} onChange={e => selectEvent(e.target.value)} className="font-bold text-sm text-brand-text bg-transparent border border-brand-border rounded-lg px-2 py-1 max-w-[220px]">
+                    {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                  </select>
+                ) : <span className="font-bold text-sm text-brand-text">No event yet</span>}
+                <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span> Check-In Open
+                </span>
+                {currentEvent && <span className="hidden md:inline text-xs text-slate-400">• {currentEvent.venue} • {fmtEventDate(currentEvent)}</span>}
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setCurrentTab('scanner')}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold bg-brand-blue hover:bg-brand-blue-hover text-white transition-colors shadow-sm"
+                >
+                  <span>Scan Pass</span>
+                </button>
+                <button
+                  onClick={() => { setEditingAttendee(null); setIsAddModalOpen(true); }}
+                  className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium border border-brand-border bg-white hover:bg-slate-50 text-slate-700 transition-colors"
+                >
+                  <span>+ Add Attendee</span>
+                </button>
+                <button onClick={onLogout} className="md:hidden px-3 py-1.5 rounded-lg text-xs font-medium border border-brand-border bg-white text-slate-700">Log out</button>
+              </div>
+            </header>
+
+            {/* Tab Views */}
+            <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+              {currentTab === 'overview' && (
+                <div className="space-y-6">
+                  {/* 4 KPIs */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Total Registrations</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-brand-text">{stats.total}</span>
+                        <span className="text-xs text-slate-400">100% Roster</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Checked In</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-emerald-600">{stats.checkedIn}</span>
+                        <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Inside Venue</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Not Yet Arrived</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-amber-700">{stats.notArrived}</span>
+                        <span className="text-xs text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Pending</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-xl border border-brand-border shadow-sm">
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">Attendance Rate</span>
+                      <div className="mt-2 flex items-baseline justify-between">
+                        <span className="text-2xl font-bold font-mono text-brand-blue">{stats.attendanceRate}%</span>
+                        <span className="text-xs text-slate-400">Live Quorum</span>
+                      </div>
+                      <div className="mt-3 w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-brand-blue h-full rounded-full transition-all duration-500" style={{ width: `${stats.attendanceRate}%` }}></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Main Grid */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2 space-y-6">
+                      {/* Ticket Tier Breakdown */}
+                      <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm">
+                        <h3 className="text-sm font-semibold text-brand-text mb-4">Turnout by Ticket Tier</h3>
+                        <div className="space-y-3.5">
+                          {stats.breakdown.map(item => (
+                            <div key={item.ticketType} className="space-y-1.5">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-medium text-slate-700">{item.ticketType}</span>
+                                <span className="font-mono text-slate-500">{item.checkedIn} / {item.total} ({item.rate}%)</span>
+                              </div>
+                              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                <div className="bg-brand-blue h-full rounded-full" style={{ width: `${item.rate}%` }}></div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Event Logistics */}
+                      <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Venue Location</div>
+                          <div className="font-semibold text-brand-text mt-1">{currentEvent ? currentEvent.venue : '-'}</div>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Operational Date</div>
+                          <div className="font-semibold text-brand-text mt-1">{currentEvent ? fmtEventDate(currentEvent) : '-'}</div>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div className="text-slate-400 font-medium uppercase text-[10px]">Start Time</div>
+                          <div className="font-semibold text-brand-text mt-1">{currentEvent ? fmtEventTime(currentEvent) : '-'}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right column: Recent activity */}
+                    <div className="bg-white rounded-xl border border-brand-border p-5 shadow-sm flex flex-col">
+                      <h3 className="text-sm font-semibold text-brand-text pb-3 border-b border-brand-border">Recent Check-In Activity</h3>
+                      <div className="divide-y divide-slate-100 flex-1 overflow-y-auto max-h-[460px]">
+                        {stats.recentCheckIns.map(item => (
+                          <div key={item.id} className="py-2.5 flex items-center justify-between text-xs">
+                            <div>
+                              <div className="font-semibold text-brand-text">{item.name}</div>
+                              <div className="text-[11px] text-slate-500">{item.ticket_type} • {item.gate || 'Main Gate'}</div>
+                            </div>
+                            <span className="font-mono text-[11px] text-slate-400">{item.checked_in_at.split(' ')[1] || item.checked_in_at}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Attendees Tab */}
+              {currentTab === 'events' && (
+                <EventsView
+                  events={events}
+                  activeId={activeEventId}
+                  onSave={handleSaveEvent}
+                  onOpen={(id) => { selectEvent(id); setCurrentTab('overview'); }}
+                  onDelete={handleDeleteEvent}
+                />
+              )}
+
+              {currentTab === 'attendees' && (
+                <AttendeesView
+                  attendees={attendees}
+                  onViewPass={(att) => setViewingPass(att)}
+                  onEdit={(att) => { setEditingAttendee(att); setIsAddModalOpen(true); }}
+                  onDelete={(att) => setDeletingAttendee(att)}
+                  onToggleCheckIn={(att) => {
+                    if (att.checked_in === 1) handleUndoCheckIn(att.id);
+                    else handleCheckInAttempt(att.pass_code);
+                  }}
+                  onOpenAdd={() => { setEditingAttendee(null); setIsAddModalOpen(true); }}
+                />
+              )}
+
+              {/* Scanner Tab */}
+              {currentTab === 'scanner' && (
+                <ScannerView
+                  eventName={currentEvent ? currentEvent.name : ''}
+                  isDemo={activeEventId === DEMO_EVENT_ID}
+                  onCheckIn={handleCheckInAttempt}
+                  onViewPass={(att) => setViewingPass(att)}
+                />
+              )}
+
+              {/* Reports Tab */}
+              {currentTab === 'reports' && (
+                <ReportsView
+                  stats={stats}
+                  logs={logs}
+                  onExportAttendees={handleExportAttendeesCSV}
+                  onExportLogs={handleExportLogsCSV}
+                />
+              )}
+
+              {/* Settings Tab */}
+              {currentTab === 'settings' && (
+                <SettingsView onResetBaseline={handleResetDemoData} />
+              )}
+            </main>
+          </div>
+
+          {/* Pass Modal */}
+          {viewingPass && (
+            <PassModal
+              attendee={viewingPass}
+              event={{ ...currentEvent, date_str: fmtEventDate(currentEvent) + ' ' + fmtEventTime(currentEvent) }}
+              onClose={() => setViewingPass(null)}
+            />
+          )}
+
+          {/* Add/Edit Modal */}
+          {isAddModalOpen && (
+            <AttendeeFormModal
+              initialData={editingAttendee}
+              onClose={() => { setIsAddModalOpen(false); setEditingAttendee(null); }}
+              onSave={handleSaveAttendee}
+            />
+          )}
+
+          {/* Delete Confirm Modal */}
+          {deletingAttendee && (
+            <ConfirmModal
+              title="Delete Attendee Registration"
+              message={`Are you sure you want to revoke registration for ${deletingAttendee.name}?`}
+              onConfirm={handleDeleteAttendee}
+              onClose={() => setDeletingAttendee(null)}
+            />
+          )}
+
+          {/* Toast Container */}
+          <div className="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none">
+            {toasts.map(t => (
+              <div key={t.id} className={`pointer-events-auto p-3.5 rounded-xl border shadow-lg text-xs ${t.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : t.type === 'error' ? 'bg-red-50 border-red-200 text-red-950' : 'bg-blue-50 border-blue-200 text-blue-950'}`}>
+                <div className="font-bold">{t.title}</div>
+                {t.description && <div className="mt-0.5">{t.description}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- Sub-Components ---
+    // ---------- Authentication ----------
+    function Logo({ dark }) {
+      return (
+        <div className="flex items-center space-x-2.5">
+          <div className="w-9 h-9 rounded-lg bg-brand-blue flex items-center justify-center shadow-sm">
+            <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <rect width="18" height="18" x="3" y="3" rx="3" /><rect width="4" height="4" x="7" y="7" /><rect width="4" height="4" x="13" y="7" /><rect width="4" height="4" x="7" y="13" /><path d="M13 13h4v4" />
+            </svg>
+          </div>
+          <div>
+            <div className={`font-bold text-base tracking-tight leading-none ${dark ? 'text-white' : 'text-brand-text'}`}>GatePass</div>
+            <p className={`text-[11px] mt-0.5 ${dark ? 'text-slate-400' : 'text-slate-500'}`}>Every entry, accounted for.</p>
+          </div>
+        </div>
+      );
+    }
+
+    function Root() {
+      const [state, setState] = useState({ loading: true, user: null, setupRequired: false, offline: false });
+      const load = async () => {
+        try {
+          const r = await api('/auth/me');
+          setState({ loading: false, user: r.user, setupRequired: r.setupRequired, offline: false });
+        } catch (e) { setState(s => ({ ...s, loading: false, offline: true })); }
+      };
+      useEffect(() => {
+        load();
+        window.addEventListener('gp-unauth', load);
+        return () => window.removeEventListener('gp-unauth', load);
+      }, []);
+      const logout = async () => { try { await api('/auth/logout', { method: 'POST' }); } catch (e) {} load(); };
+
+      if (state.loading) return <div className="min-h-screen flex items-center justify-center text-sm text-slate-500">Loading...</div>;
+      if (!state.user) return <LoginPage setupRequired={state.setupRequired} offline={state.offline} onAuthed={load} />;
+      return state.user.role === 'manager'
+        ? <ManagerApp user={state.user} onLogout={logout} />
+        : <GuestApp user={state.user} onLogout={logout} />;
+    }
+
+    function LoginPage({ setupRequired, offline, onAuthed }) {
+      const [role, setRole] = useState('guest');
+      const [mode, setMode] = useState('signin');
+      const [form, setForm] = useState({ name: '', email: '', password: '' });
+      const [error, setError] = useState('');
+      const [busy, setBusy] = useState(false);
+      const isSetup = role === 'manager' && setupRequired;
+      const isSignup = isSetup || (role === 'guest' && mode === 'signup');
+      const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+      const input = "w-full px-3 py-2.5 text-sm bg-slate-50 border border-brand-border rounded-lg";
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setError(''); setBusy(true);
+        try {
+          if (isSetup) await api('/auth/setup', { method: 'POST', body: form });
+          else if (isSignup) await api('/auth/signup', { method: 'POST', body: form });
+          else await api('/auth/login', { method: 'POST', body: { email: form.email, password: form.password, as: role } });
+          await onAuthed();
+        } catch (err) { setError(err.message); setBusy(false); }
+      };
+
+      const heading = isSetup ? 'Set up the event manager account'
+        : isSignup ? 'Create your guest account'
+        : role === 'manager' ? 'Event manager sign in' : 'Guest sign in';
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4 bg-brand-bg">
+          <div className="w-full max-w-md">
+            <div className="flex justify-center mb-6"><Logo /></div>
+            <div className="bg-white rounded-xl border border-brand-border shadow-sm overflow-hidden">
+              <div className="grid grid-cols-2 text-sm font-semibold border-b border-brand-border">
+                {[['guest', 'Guest'], ['manager', 'Event Manager']].map(([id, label]) => (
+                  <button key={id} type="button" onClick={() => { setRole(id); setError(''); }}
+                    className={`py-3 ${role === id ? 'bg-white text-brand-blue border-b-2 border-brand-blue' : 'bg-slate-50 text-slate-500'}`}>{label}</button>
+                ))}
+              </div>
+              <form onSubmit={submit} className="p-6 space-y-4">
+                <div>
+                  <h1 className="text-lg font-bold text-brand-text">{heading}</h1>
+                  {isSetup && <p className="text-xs text-slate-500 mt-1">No manager account exists yet. Create it now. This can only be done once, and it has full access to every event.</p>}
+                  {role === 'guest' && !isSignup && <p className="text-xs text-slate-500 mt-1">Sign in to register for an event and download your QR pass.</p>}
+                  {role === 'manager' && !isSetup && <p className="text-xs text-slate-500 mt-1">Full access to events, attendees, scanning and reports.</p>}
+                </div>
+                {offline && <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">Cannot reach the GatePass server.</div>}
+                {isSignup && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
+                    <input className={input} value={form.name} onChange={set('name')} autoComplete="name" maxLength={120} required />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Email</label>
+                  <input type="email" className={input} value={form.email} onChange={set('email')} autoComplete="email" required />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Password{isSignup ? ' (at least 8 characters)' : ''}</label>
+                  <input type="password" className={input} value={form.password} onChange={set('password')} autoComplete={isSignup ? 'new-password' : 'current-password'} minLength={isSignup ? 8 : undefined} required />
+                </div>
+                {error && <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">{error}</div>}
+                <button type="submit" disabled={busy} className="w-full py-2.5 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-sm font-semibold shadow-sm disabled:opacity-60">
+                  {busy ? 'Please wait...' : isSetup ? 'Create Manager Account' : isSignup ? 'Create Account' : 'Sign In'}
+                </button>
+                {role === 'guest' && (
+                  <p className="text-xs text-center text-slate-500">
+                    {mode === 'signin' ? "New here? " : 'Already have an account? '}
+                    <button type="button" className="text-brand-blue font-semibold" onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setError(''); }}>
+                      {mode === 'signin' ? 'Create a guest account' : 'Sign in'}
+                    </button>
+                  </p>
+                )}
+              </form>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- Guest portal: register for an event and download the QR pass ----------
+    function GuestApp({ user, onLogout }) {
+      const [events, setEvents] = useState([]);
+      const [passes, setPasses] = useState([]);
+      const [loaded, setLoaded] = useState(false);
+      const [loadError, setLoadError] = useState('');
+      const [registering, setRegistering] = useState(null);
+      const [viewing, setViewing] = useState(null);
+
+      const load = async () => {
+        try {
+          const [e, p] = await Promise.all([api('/events'), api('/guest/passes')]);
+          setEvents(e); setPasses(p); setLoadError('');
+        } catch (err) { setLoadError(err.message); }
+        setLoaded(true);
+      };
+      useEffect(() => { load(); }, []);
+      const passFor = (eventId) => passes.find(p => p.event_id === eventId);
+
+      return (
+        <div className="min-h-screen bg-brand-bg">
+          <header className="bg-brand-navy px-4 sm:px-6 py-3 flex items-center justify-between">
+            <Logo dark />
+            <div className="flex items-center space-x-3 text-xs">
+              <span className="text-slate-300 hidden sm:inline">{user.name}</span>
+              <button onClick={onLogout} className="px-3 py-1.5 rounded-lg border border-slate-500 text-slate-200 hover:bg-brand-navy-light">Log out</button>
+            </div>
+          </header>
+
+          <main className="max-w-3xl mx-auto p-4 sm:p-6 space-y-8">
+            <div>
+              <h1 className="text-xl font-bold text-brand-text">Welcome, {user.name.split(' ')[0]}</h1>
+              <p className="text-xs text-slate-500 mt-1">Register for an event to get your QR pass, then show it at the entrance.</p>
+            </div>
+            {loadError && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">{loadError}</div>}
+
+            {passes.length > 0 && (
+              <section className="space-y-3">
+                <h2 className="text-sm font-bold text-brand-text">My Passes</h2>
+                {passes.map(ps => (
+                  <div key={ps.id} className="bg-white p-4 rounded-xl border border-brand-border shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-bold text-sm text-brand-text">{ps.event_name}</div>
+                      <div className="text-xs text-slate-500 mt-1">{fmtEventDate(ps)} at {fmtEventTime(ps)}</div>
+                      <div className="text-xs text-slate-500">{ps.venue}</div>
+                      <div className="text-[11px] mt-1.5 font-mono text-slate-600">{ps.pass_code}
+                        <span className={`ml-2 px-1.5 py-0.5 rounded font-sans font-medium ${ps.checked_in === 1 ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{ps.checked_in === 1 ? 'Checked in' : 'Not yet checked in'}</span>
+                      </div>
+                    </div>
+                    <button onClick={() => setViewing(ps)} className="px-3.5 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-xs font-semibold flex-shrink-0">View &amp; Download QR</button>
+                  </div>
+                ))}
+              </section>
+            )}
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-bold text-brand-text">Available Events</h2>
+              {loaded && events.length === 0 && (
+                <div className="bg-white p-6 rounded-xl border border-dashed border-brand-border text-center text-xs text-slate-500">No events are open for registration yet. Please check back later.</div>
+              )}
+              {events.map(ev => {
+                const mine = passFor(ev.id);
+                return (
+                  <div key={ev.id} className="bg-white p-4 rounded-xl border border-brand-border shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-bold text-sm text-brand-text">{ev.name}</div>
+                      <div className="text-xs text-slate-500 mt-1">{fmtEventDate(ev)} at {fmtEventTime(ev)}</div>
+                      <div className="text-xs text-slate-500">{ev.venue}</div>
+                      {ev.description && <div className="text-xs text-slate-400 mt-1">{ev.description}</div>}
+                    </div>
+                    {mine ? (
+                      <button onClick={() => setViewing(mine)} className="px-3.5 py-2 border border-emerald-200 bg-emerald-50 text-emerald-800 rounded-lg text-xs font-semibold flex-shrink-0">Registered - view pass</button>
+                    ) : (
+                      <button onClick={() => setRegistering(ev)} className="px-3.5 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-xs font-semibold flex-shrink-0">Register</button>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
+          </main>
+
+          {registering && (
+            <GuestRegisterModal event={registering} user={user} onClose={() => setRegistering(null)}
+              onDone={(pass) => { setRegistering(null); setViewing(pass); load(); }} />
+          )}
+          {viewing && <GuestPassModal pass={viewing} onClose={() => setViewing(null)} />}
+        </div>
+      );
+    }
+
+    function GuestRegisterModal({ event, user, onClose, onDone }) {
+      const [name, setName] = useState(user.name);
+      const [phone, setPhone] = useState('');
+      const [company, setCompany] = useState('');
+      const [error, setError] = useState('');
+      const [busy, setBusy] = useState(false);
+      const input = "w-full px-3 py-2 text-sm bg-slate-50 border border-brand-border rounded-lg";
+      const submit = async (e) => {
+        e.preventDefault();
+        setError('');
+        if (!name.trim()) return setError('Name is required.');
+        setBusy(true);
+        try {
+          const pass = await api('/guest/register', { method: 'POST', body: { event_id: event.id, name: name.trim(), phone: phone.trim(), company: company.trim() } });
+          onDone(pass);
+        } catch (err) { setError(err.message); setBusy(false); }
+      };
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <form onSubmit={submit} className="bg-white rounded-xl border border-brand-border shadow-2xl max-w-md w-full p-5 space-y-3.5">
+            <div>
+              <h3 className="text-base font-bold text-brand-text">Register for {event.name}</h3>
+              <p className="text-xs text-slate-500 mt-0.5">{fmtEventDate(event)} at {fmtEventTime(event)} - {event.venue}</p>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name *</label>
+              <input className={input} value={name} onChange={e => setName(e.target.value)} maxLength={120} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Email</label>
+              <input className={input + ' text-slate-500'} value={user.email} readOnly />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Phone</label>
+                <input className={input} value={phone} onChange={e => setPhone(e.target.value)} maxLength={40} />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Company</label>
+                <input className={input} value={company} onChange={e => setCompany(e.target.value)} maxLength={200} />
+              </div>
+            </div>
+            {error && <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">{error}</div>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button type="button" onClick={onClose} className="px-3.5 py-2 border border-brand-border rounded-lg text-xs font-semibold text-slate-700">Cancel</button>
+              <button type="submit" disabled={busy} className="px-3.5 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-xs font-semibold disabled:opacity-60">{busy ? 'Registering...' : 'Register & Get QR'}</button>
+            </div>
+          </form>
+        </div>
+      );
+    }
+
+    function GuestPassModal({ pass, onClose }) {
+      const holder = useRef(null);
+      useEffect(() => {
+        if (!holder.current) return;
+        holder.current.innerHTML = '';
+        new QRCode(holder.current, { text: pass.pass_code, width: 220, height: 220, colorDark: '#000000', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.H });
+      }, [pass]);
+
+      const downloadPng = () => {
+        const tmp = document.createElement('div');
+        new QRCode(tmp, { text: pass.pass_code, width: 300, height: 300, colorDark: '#000000', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.H });
+        const qr = tmp.querySelector('canvas');
+        const W = 520, H = 700;
+        const c = document.createElement('canvas'); c.width = W; c.height = H;
+        const x = c.getContext('2d');
+        const fit = (text, font, maxW) => { x.font = font; let t = text; while (x.measureText(t).width > maxW && t.length > 3) t = t.slice(0, -2); return t === text ? t : t.trim() + '...'; };
+        x.fillStyle = '#ffffff'; x.fillRect(0, 0, W, H);
+        x.fillStyle = '#17243A'; x.fillRect(0, 0, W, 130);
+        x.fillStyle = '#ffffff'; x.textAlign = 'center';
+        x.font = 'bold 28px Arial'; x.fillText(fit(pass.event_name, 'bold 28px Arial', W - 60), W / 2, 58);
+        x.fillStyle = '#cbd5e1';
+        x.font = '16px Arial'; x.fillText(fit(fmtEventDate(pass) + ' at ' + fmtEventTime(pass), '16px Arial', W - 60), W / 2, 90);
+        x.fillText(fit(pass.venue, '16px Arial', W - 60), W / 2, 114);
+        if (qr) x.drawImage(qr, (W - 300) / 2, 160, 300, 300);
+        x.fillStyle = '#0F172A';
+        x.font = 'bold 26px monospace'; x.fillText(pass.pass_code, W / 2, 510);
+        x.font = 'bold 22px Arial'; x.fillText(fit(pass.name, 'bold 22px Arial', W - 60), W / 2, 552);
+        x.fillStyle = '#64748B'; x.font = '16px Arial';
+        x.fillText(pass.ticket_type, W / 2, 582);
+        x.fillText(fit(pass.email, '16px Arial', W - 60), W / 2, 608);
+        x.fillStyle = '#94A3B8'; x.font = '14px Arial'; x.fillText('Show this QR code at the entrance', W / 2, 660);
+        const a = document.createElement('a');
+        a.href = c.toDataURL('image/png');
+        a.download = 'gatepass-' + pass.pass_code + '.png';
+        a.click();
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-2xl max-w-sm w-full overflow-hidden">
+            <div id="printable-ticket" className="p-5">
+              <div className="bg-brand-navy text-white p-4 rounded-t-xl">
+                <div className="text-xs font-bold">GatePass Official Ticket</div>
+                <div className="text-lg font-bold mt-1.5">{pass.event_name}</div>
+                <div className="text-xs text-slate-300 mt-0.5">{fmtEventDate(pass)} at {fmtEventTime(pass)}</div>
+                <div className="text-xs text-slate-300">{pass.venue}</div>
+              </div>
+              <div className="p-4 border border-t-0 border-brand-border rounded-b-xl flex flex-col items-center">
+                <div ref={holder} className="p-2 border rounded-lg bg-white my-2"></div>
+                <div className="font-mono font-bold text-base mt-2">{pass.pass_code}</div>
+                <div className="text-base font-bold text-brand-text mt-1">{pass.name}</div>
+                <div className="text-xs text-slate-500">{pass.email}</div>
+                <div className="text-[11px] text-slate-400 mt-1">{pass.ticket_type}</div>
+              </div>
+            </div>
+            <div className="p-4 bg-slate-50 border-t flex justify-between gap-2">
+              <div className="flex gap-2">
+                <button onClick={downloadPng} className="px-3 py-1.5 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-xs font-semibold">Download QR (PNG)</button>
+                <button onClick={() => window.print()} className="px-3 py-1.5 border border-brand-border bg-white rounded-lg text-xs font-semibold text-slate-700">Print</button>
+              </div>
+              <button onClick={onClose} className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 rounded-lg text-xs font-semibold">Close</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function EventsView({ events, activeId, onSave, onOpen, onDelete }) {
+      const blank = { name: '', venue: '', event_date: '', event_time: '', description: '' };
+      const [form, setForm] = useState(blank);
+      const [editingId, setEditingId] = useState(null);
+      const [error, setError] = useState('');
+      const [saving, setSaving] = useState(false);
+      const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+      const input = "w-full px-3 py-2 text-sm bg-slate-50 border border-brand-border rounded-lg";
+
+      const submit = async (e) => {
+        e.preventDefault();
+        setError('');
+        if (!form.name.trim()) return setError('Event name is required.');
+        if (!form.venue.trim()) return setError('Event venue is required.');
+        if (!form.event_date) return setError('Event date is required.');
+        if (!form.event_time) return setError('Event time is required.');
+        setSaving(true);
+        try {
+          await onSave({ ...form, name: form.name.trim(), venue: form.venue.trim(), description: form.description.trim() }, editingId);
+          setForm(blank); setEditingId(null);
+        } catch (err) { setError(err.message); }
+        setSaving(false);
+      };
+
+      const startEdit = (ev) => {
+        setEditingId(ev.id);
+        setForm({ name: ev.name, venue: ev.venue, event_date: ev.event_date, event_time: ev.event_time, description: ev.description || '' });
+        setError(''); window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+
+      return (
+        <div className="space-y-6 max-w-4xl mx-auto">
+          <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm">
+            <h2 className="text-lg font-bold text-brand-text">{editingId ? 'Edit Event' : 'Add New Event'}</h2>
+            <p className="text-xs text-slate-500 mt-0.5">Each event has its own attendees, passes, check-ins and reports.</p>
+            <form onSubmit={submit} className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Event Name *</label>
+                <input className={input} value={form.name} onChange={set('name')} placeholder="e.g. Annual Tech Summit 2026" maxLength={120} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Event Venue *</label>
+                <input className={input} value={form.venue} onChange={set('venue')} placeholder="e.g. City Convention Center, Hall B" maxLength={200} />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Event Date *</label>
+                <input type="date" className={input} value={form.event_date} onChange={set('event_date')} />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Event Time *</label>
+                <input type="time" className={input} value={form.event_time} onChange={set('event_time')} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Description (optional)</label>
+                <input className={input} value={form.description} onChange={set('description')} maxLength={300} />
+              </div>
+              {error && <div className="sm:col-span-2 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">{error}</div>}
+              <div className="sm:col-span-2 flex gap-2">
+                <button type="submit" disabled={saving} className="px-4 py-2 bg-brand-blue hover:bg-brand-blue-hover text-white rounded-lg text-xs font-semibold shadow-sm disabled:opacity-60">
+                  {saving ? 'Saving...' : editingId ? 'Save Changes' : 'Create Event'}
+                </button>
+                {editingId && (
+                  <button type="button" onClick={() => { setEditingId(null); setForm(blank); setError(''); }} className="px-4 py-2 border border-brand-border rounded-lg text-xs font-semibold text-slate-700">Cancel</button>
+                )}
+              </div>
+            </form>
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-sm font-bold text-brand-text">Your Events ({events.length})</h3>
+            {events.length === 0 && (
+              <div className="bg-white p-6 rounded-xl border border-dashed border-brand-border text-center text-xs text-slate-500">No events yet. Create your first event above to start registering attendees.</div>
+            )}
+            {events.map(ev => (
+              <div key={ev.id} className={`bg-white p-4 rounded-xl border shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${ev.id === activeId ? 'border-brand-blue' : 'border-brand-border'}`}>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm text-brand-text truncate">{ev.name}</span>
+                    {ev.id === activeId && <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-blue-light text-brand-blue font-semibold">ACTIVE</span>}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">{fmtEventDate(ev)} at {fmtEventTime(ev)}</div>
+                  <div className="text-xs text-slate-500">{ev.venue}</div>
+                  <div className="text-[11px] text-slate-400 mt-1 font-mono">{ev.checked_in_count} / {ev.attendee_count} checked in</div>
+                </div>
+                <div className="flex gap-2 flex-shrink-0">
+                  <button onClick={() => onOpen(ev.id)} className="px-3 py-1.5 bg-brand-blue text-white rounded-lg text-xs font-semibold">Open</button>
+                  <button onClick={() => startEdit(ev)} className="px-3 py-1.5 border border-brand-border rounded-lg text-xs font-semibold text-slate-700">Edit</button>
+                  <button onClick={() => { if (confirm(`Delete "${ev.name}" and all its ${ev.attendee_count} attendees and logs? This cannot be undone.`)) onDelete(ev); }} className="px-3 py-1.5 border border-red-200 text-red-700 rounded-lg text-xs font-semibold">Delete</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function AttendeesView({ attendees, onViewPass, onEdit, onDelete, onToggleCheckIn, onOpenAdd }) {
+      const [search, setSearch] = useState('');
+      const [status, setStatus] = useState('all');
+      const [tier, setTier] = useState('all');
+
+      const filtered = attendees.filter(a => {
+        const matchesSearch = !search || a.name.toLowerCase().includes(search.toLowerCase()) || a.email.toLowerCase().includes(search.toLowerCase()) || a.pass_code.toLowerCase().includes(search.toLowerCase());
+        const matchesStatus = status === 'all' || (status === 'checked_in' ? a.checked_in === 1 : a.checked_in === 0);
+        const matchesTier = tier === 'all' || a.ticket_type === tier;
+        return matchesSearch && matchesStatus && matchesTier;
+      });
+
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white p-3.5 rounded-xl border border-brand-border shadow-sm">
+            <input
+              type="text"
+              placeholder="Search name, email, or pass code..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="px-3 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg flex-1"
+            />
+            <div className="flex items-center space-x-2">
+              <select value={status} onChange={e => setStatus(e.target.value)} className="px-2.5 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg">
+                <option value="all">All Statuses</option>
+                <option value="checked_in">Checked In</option>
+                <option value="not_arrived">Not Arrived</option>
+              </select>
+              <select value={tier} onChange={e => setTier(e.target.value)} className="px-2.5 py-1.5 text-xs bg-slate-50 border border-brand-border rounded-lg">
+                <option value="all">All Tiers</option>
+                <option value="General Admission">General Admission</option>
+                <option value="VIP">VIP</option>
+                <option value="Speaker">Speaker</option>
+                <option value="Sponsor">Sponsor</option>
+                <option value="Press">Press</option>
+              </select>
+              <button onClick={onOpenAdd} className="px-3 py-1.5 bg-brand-blue text-white rounded-lg text-xs font-semibold whitespace-nowrap">+ Add</button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-brand-border shadow-sm overflow-hidden">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 border-b border-brand-border uppercase text-[10px] text-slate-500 font-semibold">
+                <tr>
+                  <th className="p-3">Attendee</th>
+                  <th className="p-3">Contact</th>
+                  <th className="p-3">Tier</th>
+                  <th className="p-3">Pass Code</th>
+                  <th className="p-3">Status</th>
+                  <th className="p-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-brand-border">
+                {filtered.map(a => {
+                  const badge = getTicketBadge(a.ticket_type);
+                  return (
+                    <tr key={a.id} className="hover:bg-slate-50">
+                      <td className="p-3 font-semibold text-brand-text">
+                        <div>{a.name}</div>
+                        <div className="text-[11px] text-slate-400 font-normal">{a.company || 'Individual'}</div>
+                      </td>
+                      <td className="p-3 text-slate-600">{a.email}</td>
+                      <td className="p-3">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${badge.bg} ${badge.text} ${badge.border}`}>
+                          {a.ticket_type}
+                        </span>
+                      </td>
+                      <td className="p-3 font-mono font-bold text-slate-700">{a.pass_code}</td>
+                      <td className="p-3">
+                        {a.checked_in === 1 ? (
+                          <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 text-[10px]">Checked In</span>
+                        ) : (
+                          <span className="text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full text-[10px]">Not Arrived</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-right space-x-1 whitespace-nowrap">
+                        <button onClick={() => onViewPass(a)} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-[11px] font-medium">QR Pass</button>
+                        <button onClick={() => onToggleCheckIn(a)} className={`px-2 py-1 rounded text-[11px] font-medium ${a.checked_in === 1 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                          {a.checked_in === 1 ? 'Undo' : 'Check In'}
+                        </button>
+                        <button onClick={() => onEdit(a)} className="px-2 py-1 text-slate-600 hover:bg-slate-100 rounded text-[11px]">Edit</button>
+                        <button onClick={() => onDelete(a)} className="px-2 py-1 text-red-600 hover:bg-red-50 rounded text-[11px]">Delete</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    function ScannerView({ onCheckIn, onViewPass, eventName, isDemo }) {
+      const [manualCode, setManualCode] = useState('');
+      const [result, setResult] = useState(null);
+      const [soundMuted, setSoundMuted] = useState(false);
+
+      const [cameraOn, setCameraOn] = useState(false);
+      const [camError, setCamError] = useState('');
+      const lastScan = useRef({ code: '', t: 0 });
+      const handleScan = async (code) => {
+        const res = await onCheckIn(code);
+        setResult(res);
+      };
+      const scanRef = useRef(handleScan);
+      scanRef.current = handleScan;
+
+      useEffect(() => {
+        if (!cameraOn) return;
+        setCamError('');
+        const scanner = new Html5Qrcode('qr-reader');
+        scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 220 } },
+          (text) => {
+            const n = Date.now();
+            if (text === lastScan.current.code && n - lastScan.current.t < 3000) return;
+            lastScan.current = { code: text, t: n };
+            scanRef.current(text);
+          }, () => {})
+          .catch(err => { setCamError('Camera unavailable: ' + err + ' (browsers require HTTPS or localhost for camera access)'); setCameraOn(false); });
+        return () => { scanner.stop().then(() => scanner.clear()).catch(() => {}); };
+      }, [cameraOn]);
+
+      return (
+        <div className="space-y-6 max-w-4xl mx-auto">
+          <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-bold text-brand-text">Entrance Check-In Terminal</h2>
+              <p className="text-xs text-slate-500">Checking in for {eventName || 'no event selected'}. Scan via camera or enter pass code manually</p>
+            </div>
+            <button
+              onClick={() => { setSoundMuted(!soundMuted); sound.enabled = soundMuted; }}
+              className="text-xs px-3 py-1.5 border border-brand-border rounded-lg bg-slate-50 text-slate-700 font-medium"
+            >
+              {soundMuted ? 'Muted' : 'Audio Chime ON'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Input Side */}
+            <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm space-y-4">
+              <h3 className="text-sm font-semibold text-brand-text">Pass Code Verification</h3>
+              <div>
+                <button onClick={() => setCameraOn(!cameraOn)} className="w-full px-3 py-2 text-xs font-semibold rounded-lg bg-brand-blue hover:bg-brand-blue-hover text-white">
+                  {cameraOn ? 'Stop Camera' : 'Scan QR with Camera'}
+                </button>
+                <div id="qr-reader" className="mt-3 rounded-lg overflow-hidden" style={{ display: cameraOn ? 'block' : 'none' }}></div>
+                {camError && <p className="text-xs text-red-700 mt-2">{camError}</p>}
+              </div>
+              <form onSubmit={e => { e.preventDefault(); handleScan(manualCode); setManualCode(''); }}>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Enter pass code (e.g. GP-TC26-GA113)"
+                    value={manualCode}
+                    onChange={e => setManualCode(e.target.value)}
+                    className="w-full px-3 py-2.5 text-sm font-mono font-bold uppercase tracking-wider bg-slate-50 border border-brand-border rounded-lg"
+                    autoFocus
+                  />
+                  <button type="submit" className="mt-2 w-full py-2 bg-brand-blue text-white rounded-lg text-xs font-semibold shadow-sm">
+                    Verify & Check In
+                  </button>
+                </div>
+              </form>
+
+              {isDemo && <div className="pt-3 border-t border-slate-100">
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Quick Test Passes</div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <button onClick={() => handleScan('GP-TC26-GA113')} className="px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded text-xs font-mono">
+                    Valid: Lucas Bernard
+                  </button>
+                  <button onClick={() => handleScan('GP-TC26-SPK01')} className="px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded text-xs font-mono">
+                    Duplicate: Elena Rostova
+                  </button>
+                  <button onClick={() => handleScan('GP-FAKE-CODE')} className="px-2.5 py-1 bg-red-50 text-red-800 border border-red-200 rounded text-xs font-mono">
+                    Invalid Code
+                  </button>
+                </div>
+              </div>}
+            </div>
+
+            {/* Result Side */}
+            <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm flex flex-col justify-center min-h-[260px]">
+              {!result ? (
+                <div className="text-center text-slate-400 text-xs py-8">
+                  Awaiting credential scan. Enter pass code on the left to verify entry.
+                </div>
+              ) : result.status === 'SUCCESS' ? (
+                <div className="p-4 bg-status-success-bg border border-status-success-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-success-text text-sm">ENTRY VERIFIED & CHECKED IN</div>
+                  <div className="text-base font-bold text-slate-900">{result.attendee.name}</div>
+                  <div className="text-xs text-slate-600">{result.attendee.ticket_type} • Pass: {result.attendee.pass_code}</div>
+                  <div className="text-[11px] text-emerald-800 font-mono">Timestamp: {result.checkInTime}</div>
+                </div>
+              ) : result.status === 'ALREADY_CHECKED_IN' ? (
+                <div className="p-4 bg-status-warning-bg border border-status-warning-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-warning-text text-sm">PASS ALREADY USED (DUPLICATE)</div>
+                  <div className="text-base font-bold text-slate-900">{result.attendee.name}</div>
+                  <div className="text-xs text-amber-900">Previously checked in at: {result.previousCheckInTime}</div>
+                  <div className="text-[11px] text-slate-500 italic">Duplicate re-entry has been blocked.</div>
+                </div>
+              ) : (
+                <div className="p-4 bg-status-error-bg border border-status-error-border rounded-xl space-y-2">
+                  <div className="font-bold text-status-error-text text-sm">INVALID PASS IDENTIFIER</div>
+                  <div className="text-xs text-red-900">{result.message}</div>
+                  <div className="font-mono text-xs text-slate-700 bg-white p-2 rounded border border-red-200">{result.passCode}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ReportsView({ stats, logs, onExportAttendees, onExportLogs }) {
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-brand-text">Attendance Reports & Audits</h2>
+              <p className="text-xs text-slate-500">Live reconciliation and exportable CSV compliance records</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button onClick={onExportAttendees} className="px-3 py-1.5 bg-white border border-brand-border rounded-lg text-xs font-semibold text-slate-700 shadow-sm">
+                Export Attendees CSV
+              </button>
+              <button onClick={onExportLogs} className="px-3 py-1.5 bg-brand-navy text-white rounded-lg text-xs font-semibold shadow-sm">
+                Export Audit Logs CSV
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-brand-border shadow-sm p-4">
+            <h3 className="text-sm font-semibold text-brand-text mb-3">Entrance Audit Logs</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 border-b border-brand-border text-[10px] text-slate-500 uppercase font-semibold">
+                  <tr>
+                    <th className="p-2.5">Time</th>
+                    <th className="p-2.5">Status</th>
+                    <th className="p-2.5">Attendee</th>
+                    <th className="p-2.5">Pass Code</th>
+                    <th className="p-2.5">Gate</th>
+                    <th className="p-2.5">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-brand-border">
+                  {logs.map(l => (
+                    <tr key={l.id} className="hover:bg-slate-50">
+                      <td className="p-2.5 font-mono text-[11px] text-slate-400">{l.scanned_at}</td>
+                      <td className="p-2.5">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${l.status === 'SUCCESS' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : l.status === 'ALREADY_CHECKED_IN' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                          {l.status}
+                        </span>
+                      </td>
+                      <td className="p-2.5 font-semibold text-brand-text">{l.attendee_name}</td>
+                      <td className="p-2.5 font-mono">{l.pass_code}</td>
+                      <td className="p-2.5 text-slate-500">{l.gate}</td>
+                      <td className="p-2.5 text-slate-500">{l.notes}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function SettingsView({ onResetBaseline }) {
+      return (
+        <div className="space-y-6 max-w-2xl mx-auto">
+          <div className="bg-white p-5 rounded-xl border border-brand-border shadow-sm">
+            <h2 className="text-base font-bold text-brand-text">System & Storage Settings</h2>
+            <p className="text-xs text-slate-500 mt-0.5">Configuration details and server persistence state</p>
+
+            <div className="mt-4 space-y-2 text-xs">
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex justify-between">
+                <span>Storage Mode:</span>
+                <span className="font-mono font-bold text-brand-blue">Server-side SQLite database</span>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex justify-between">
+                <span>Anti-Passback Duplicate Enforcement:</span>
+                <span className="font-mono font-bold text-emerald-700">ACTIVE</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-5 rounded-xl border border-red-200 shadow-sm">
+            <h3 className="text-sm font-bold text-red-900">Reset Demo Data</h3>
+            <p className="text-xs text-slate-600 mt-1">Restores the TechConnect 2026 demo event with its 18 attendees. Your other events are not affected.</p>
+            <button
+              onClick={() => { if (confirm('Reset the TechConnect 2026 demo event to its initial state?')) onResetBaseline(); }}
+              className="mt-3 px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm"
+            >
+              Reset Baseline Data
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function PassModal({ attendee, event, onClose }) {
+      const qrContainerRef = useRef(null);
+
+      useEffect(() => {
+        if (qrContainerRef.current) {
+          qrContainerRef.current.innerHTML = '';
+          new QRCode(qrContainerRef.current, {
+            text: JSON.stringify({ passCode: attendee.pass_code, attendeeId: attendee.id, name: attendee.name }),
+            width: 140,
+            height: 140,
+            colorDark: "#000000",
+            colorLight: "#ffffff",
+            correctLevel: QRCode.CorrectLevel.H
+          });
+        }
+      }, [attendee]);
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-2xl max-w-md w-full overflow-hidden">
+            <div id="printable-ticket" className="p-5">
+              <div className="bg-brand-navy text-white p-4 rounded-t-xl">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold">GatePass Official Ticket</span>
+                  <span className="px-2 py-0.5 rounded bg-brand-blue font-semibold">{attendee.ticket_type}</span>
+                </div>
+                <div className="text-lg font-bold mt-2">{event.name}</div>
+                <div className="text-xs text-slate-300 mt-0.5">{event.date_str} • {event.venue}</div>
+              </div>
+
+              <div className="p-4 border border-t-0 border-brand-border rounded-b-xl flex flex-col items-center">
+                <div ref={qrContainerRef} className="p-2 border rounded-lg bg-white my-2"></div>
+                <div className="font-mono font-bold text-base mt-2">{attendee.pass_code}</div>
+                <div className="text-base font-bold text-brand-text mt-1">{attendee.name}</div>
+                <div className="text-xs text-slate-500">{attendee.email}</div>
+                <div className="text-[11px] text-slate-400 mt-1 font-mono">Status: {attendee.checked_in === 1 ? 'Checked In' : 'Not Arrived'}</div>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-between">
+              <button onClick={() => window.print()} className="px-3 py-1.5 bg-brand-navy text-white rounded-lg text-xs font-semibold">Print Badge</button>
+              <button onClick={onClose} className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 rounded-lg text-xs font-semibold">Close</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AttendeeFormModal({ initialData, onClose, onSave }) {
+      const [name, setName] = useState(initialData ? initialData.name : '');
+      const [email, setEmail] = useState(initialData ? initialData.email : '');
+      const [ticketType, setTicketType] = useState(initialData ? initialData.ticket_type : 'General Admission');
+      const [company, setCompany] = useState(initialData ? initialData.company : '');
+      const [error, setError] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        if (!name.trim()) return setError('Name is required.');
+        if (!email.trim() || !email.includes('@')) return setError('Valid email is required.');
+        try {
+          await onSave({ name: name.trim(), email: email.trim(), ticket_type: ticketType, company: company.trim() });
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-xl max-w-md w-full p-5">
+            <h3 className="text-base font-bold text-brand-text">{initialData ? 'Edit Attendee' : 'Register Attendee'}</h3>
+            {error && <div className="mt-2 p-2 bg-red-50 text-red-700 text-xs rounded border border-red-200">{error}</div>}
+            <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="font-semibold block mb-1">Full Name *</label>
+                <input type="text" required value={name} onChange={e => setName(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Email *</label>
+                <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Ticket Tier</label>
+                <select value={ticketType} onChange={e => setTicketType(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50">
+                  <option value="General Admission">General Admission</option>
+                  <option value="VIP">VIP</option>
+                  <option value="Speaker">Speaker</option>
+                  <option value="Sponsor">Sponsor</option>
+                  <option value="Press">Press</option>
+                </select>
+              </div>
+              <div>
+                <label className="font-semibold block mb-1">Company / Organization</label>
+                <input type="text" value={company} onChange={e => setCompany(e.target.value)} className="w-full p-2 border rounded-lg bg-slate-50" />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-lg border text-slate-600">Cancel</button>
+                <button type="submit" className="px-4 py-1.5 bg-brand-blue text-white rounded-lg font-semibold">Save Attendee</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function ConfirmModal({ title, message, onConfirm, onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-xl border border-brand-border shadow-xl max-w-sm w-full p-5 space-y-3">
+            <h3 className="text-base font-bold text-red-700">{title}</h3>
+            <p className="text-xs text-slate-600 leading-relaxed">{message}</p>
+            <div className="pt-2 flex justify-end space-x-2">
+              <button onClick={onClose} className="px-3 py-1.5 rounded-lg border text-slate-600 text-xs">Cancel</button>
+              <button onClick={onConfirm} className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-semibold">Confirm Delete</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+  </script>
+</body>
+</html>
